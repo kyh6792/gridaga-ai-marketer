@@ -4,7 +4,6 @@ import pandas as pd
 from datetime import datetime
 from core.database import get_conn
 from core.curriculum import get_course_price_map
-from core.ui import apply_owner_dashboard_style
 
 
 WORKSHEET_NAME = "finance_transactions"
@@ -81,7 +80,14 @@ def record_registration_payment(student_id, student_name, course, event_type="�
 
 def run_finance_ui():
     st.header("💰 재무")
-    apply_owner_dashboard_style()
+    try:
+        import core.ui as _ui
+
+        _style = getattr(_ui, "apply_owner_dashboard_style", None)
+        if callable(_style):
+            _style()
+    except Exception:
+        pass
     if "finance_detail_panel" not in st.session_state:
         st.session_state["finance_detail_panel"] = "annual"
 

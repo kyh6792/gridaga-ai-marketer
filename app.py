@@ -1,13 +1,27 @@
 import streamlit as st
 import streamlit.components.v1 as components
 from datetime import datetime, timedelta
-from core.ui import display_intro, render_owner_brand_header, render_owner_menu_grid
-try:
-    from core.ui import apply_owner_dashboard_style
-except ImportError:
-    # 배포 파일 불일치 시에도 앱이 죽지 않도록 안전 처리
-    def apply_owner_dashboard_style():
-        return None
+
+# 배포본 core/ui.py 버전이 달라도 ImportError 나지 않게 모듈 단위로 로드
+import core.ui as _ui
+
+def _noop():
+    return None
+
+
+def _stub_intro(image_path, duration=2.5):
+    st.session_state["intro_done"] = True
+
+
+def _stub_owner_menu_grid(owner_login_at="", active_idx=None):
+    st.warning("운영 메뉴 UI(`render_owner_menu_grid`)를 찾을 수 없습니다. 저장소의 `core/ui.py`를 최신으로 맞춰 주세요.")
+
+
+display_intro = getattr(_ui, "display_intro", _stub_intro)
+render_owner_brand_header = getattr(_ui, "render_owner_brand_header", _noop)
+render_owner_menu_grid = getattr(_ui, "render_owner_menu_grid", _stub_owner_menu_grid)
+apply_owner_dashboard_style = getattr(_ui, "apply_owner_dashboard_style", _noop)
+
 from core.marketer import run_marketing_ui  # 마케팅팀 모듈 호출
 from core.curriculum import run_curriculum_ui
 from core.finance import run_finance_ui
