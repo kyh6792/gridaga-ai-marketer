@@ -9,185 +9,142 @@ import pandas as pd
 from core.database import load_prompts_from_sheet, save_prompt_to_sheet, get_conn, get_history_data, save_to_history
 from core.config import DEFAULT_PROMPTS, API_MODEL
 from core.drive import get_drive_image_list, download_drive_image, upload_image_to_drive
+from core.drive import display_drive_selector
 
 def run_marketing_ui():
-    # 1. 시트에서 기본 프롬프트 로드
+    # 1. 상단 메뉴 (히스토리 분리)
+    menu = st.segmented_control(
+        "마케팅 메뉴",
+        ["✨ 문구 생성", "📜 히스토리"],
+        default="✨ 문구 생성",
+        label_visibility="collapsed",
+    )
+    st.markdown("---")
+
+    # [📜 히스토리 모드]
+    if menu == "📜 히스토리":
+        display_history_ui() # 코드가 길어지므로 별도 함수로 빼는 것을 추천
+        return
+
+    # [✨ 생성 모드] 
+    # 카테고리 선택 (심플하게)
     current_prompts = load_prompts_from_sheet(DEFAULT_PROMPTS)
-    display_categories = list(current_prompts.keys()) + ["📜 히스토리"]
+    category = st.pills("📍 어떤 사진인가요?", list(current_prompts.keys()), default=list(current_prompts.keys())[0])
 
-    category = st.radio(
-        "🏷️ 지금 어떤 사진을 올리시나요?", 
-        display_categories, 
-        horizontal=True,
-        key="marketing_radio_widget"
-    )
+    # 2. 사진 업로드 영역 (카드형 레이아웃)
+    with st.container(border=True):
+        img_source = st.toggle("☁️ 구글 드라이브 사용", value=False)
+        input_image = None
+        final_image_link = ""
 
-    st.markdown("---")
-
-    # ==========================================
-    # 분기 1: [📜 히스토리] 모드
-    # ==========================================
-    if category == "📜 히스토리":
-        st.subheader("지난 마케팅 생성 기록")
-        hist_df = get_history_data()
-        
-        if not hist_df.empty:
-            # 날짜순 정렬 (최신순)
-            hist_df = hist_df.sort_values(by='date', ascending=False)
-            hist_df['display_name'] = hist_df['date'] + " [" + hist_df['category'] + "]"
-            selected_record = st.selectbox("다시 볼 기록을 선택하세요", hist_df['display_name'])
-            
-            record_detail = hist_df[hist_df['display_name'] == selected_record].iloc[0]
-            
-            st.info(f"📅 생성일: {record_detail['date']}  |  🏷️ 카테고리: {record_detail['category']}")
-            
-          # [수정] 저장된 이미지 링크가 '진짜 문자열'인지 확인하는 로직 추가
-            img_link = record_detail.get('image_link', "")
-            
-            # pd.isna는 판다스에서 빈 값(NaN)인지 체크해줍니다.
-            if isinstance(img_link, str) and img_link.strip() != "":
-                col1, col2 = st.columns([1, 2])
-                with col1:
-                    st.link_button("🖼️ 원본 사진 보기", img_link, use_container_width=True)
-                with col2:
-                    st.caption("구글 드라이브에 저장된 원본 사진 링크입니다.")
-            else:
-                st.caption("📌 이 기록에는 연결된 원본 사진이 없습니다.")
-            
-            tab1, tab2 = st.tabs(["📸 인스타그램", "✍️ 네이버 블로그"])
-            with tab1:
-                st.code(record_detail['instagram'], language="text")
-                st.link_button("🚀 인스타그램 열기", "https://www.instagram.com/", use_container_width=True)
-            with tab2:
-                st.text_area("과거 블로그 내용", value=record_detail['blog'], height=350)
-            
-            if st.button("🔄 기록 새로고침", use_container_width=True):
-                st.rerun()
+        if not img_source:
+            uploaded_file = st.file_uploader("📷 사진을 선택하세요", type=['jpg', 'jpeg', 'png'])
+            if uploaded_file:
+                input_image = Image.open(uploaded_file)
+                st.image(input_image, use_container_width=True)
         else:
-            st.info("아직 저장된 히스토리가 없습니다.")
-        return 
+            # 드라이브 로직 (간소화)
+            input_image, final_image_link = display_drive_selector() # 함수화 추천
 
-    # ==========================================
-    # 분기 2: [생성 모드]
-    # ==========================================
-    
-    img_source = st.radio(
-        "📸 사진을 어디서 가져올까요?",
-        ["📱 내 폰에서 올리기", "☁️ 구글 드라이브에서 선택"],
-        horizontal=True,
-        key="img_source_selector"
-    )
-
-    input_image = None
-    final_image_link = "" 
-
-    if img_source == "📱 내 폰에서 올리기":
-        uploaded_file = st.file_uploader("사진을 선택해주세요.", type=['jpg', 'jpeg', 'png'], key="file_scanner")
-        if uploaded_file:
-            input_image = Image.open(uploaded_file)
-            st.image(input_image, caption="내 폰에서 선택 완료", use_container_width=True)
-            # 폰 사진은 '생성하기' 클릭 시 세션 초기화 방지를 위해 폰트 보존
-
-    else: # 구글 드라이브 모드
-        folder_id = st.secrets["google_drive"]["folder_id"]
-        with st.spinner("드라이브에서 사진 목록을 불러오는 중..."):
-            files = get_drive_image_list(folder_id)
-        
-        if files:
-            file_names = [f['name'] for f in files]
-            selected_name = st.selectbox("어떤 사진을 분석할까요?", file_names)
-            
-            selected_file = next(f for f in files if f['name'] == selected_name)
-            selected_file_id = selected_file['id']
-            
-            if st.button("🖼️ 사진 불러오기", use_container_width=True):
-                st.session_state['drive_img'] = download_drive_image(selected_file_id)
-                st.session_state['last_image_link'] = selected_file.get('webViewLink', '')
-            
-            if 'drive_img' in st.session_state:
-                input_image = st.session_state['drive_img']
-                # 드라이브 사진인 경우 기존 링크를 최종 링크 후보로 설정
-                final_image_link = st.session_state.get('last_image_link', '')
-                st.image(input_image, caption="드라이브에서 불러온 사진", use_container_width=True)
-        else:
-            st.warning("드라이브 폴더가 비어있거나 권한이 없습니다.")
-
-    # 3. 프롬프트 수정 익스팬더 (기본 스타일 설정)
-    with st.expander("⚙️ 기본 문구 스타일 수정하기"):
-        st.caption("💡 모든 사진에 공통으로 적용될 말투나 형식을 저장하려면 여기에 적으세요.")
-        editable_instruction = st.text_area(
-            "마케팅 팀장 지침", 
-            value=current_prompts.get(category, ""), 
-            height=150,
-            key=f"text_area_{category}"
-        )
-        if st.button("💾 이 스타일을 시트에 영구 저장"):
+    # 3. 요청 사항 (익스팬더로 숨겨서 깔끔하게)
+    with st.expander("📝 특별 요청 또는 스타일 수정"):
+        special_request = st.text_input("이번 사진에만 적용할 내용", placeholder="예: 해시태그에 #여름방학 추가")
+        editable_instruction = st.text_area("기본 AI 지침", value=current_prompts.get(category, ""), height=100)
+        if st.button("💾 기본 스타일로 저장"):
             save_prompt_to_sheet(category, editable_instruction)
-            st.success("시트에 저장되었습니다!")
+            st.success("저장 완료!")
 
-    st.markdown("---")
-
-    # 4. [신규] 이번 사진만 특별히 요청하기
-    st.subheader("📝 이번 사진에만 특별히 요청하기")
-    special_request = st.text_input(
-        label="예: 아이의 표정을 강조해줘, 태그에 #여름방학 넣어줘 등",
-        placeholder="이 사진에만 추가하고 싶은 내용을 적어주세요.",
-        key="special_request_input"
-    )
-    st.caption("⚠️ 항상 적용하고 싶은 규칙은 위 '기본 문구 스타일 수정하기'에 넣고 저장하세요.")
-
-    # 5. 분석 및 생성
+    # 4. 생성 버튼 (가장 강조)
     if input_image:
-        if st.button("✨ 마케팅 문구 생성하기", type="primary", use_container_width=True):
-            with st.spinner("그리다가 AI가 사진을 분석하고 기록하는 중입니다..."):
-                try:
-                    # 폰 사진 업로드 스킵 로직 (기존 동일)
-                    if img_source == "📱 내 폰에서 올리기":
-                        final_image_link = ""
-                    else:
-                        final_image_link = st.session_state.get('last_image_link', '')
+        if st.button("🚀 마케팅 문구 만들기", type="primary", use_container_width=True):
+            process_and_display_results(input_image, category, editable_instruction, special_request, final_image_link)
 
-                    # Gemini AI 호출
-                    client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
-                    
-                    # [수정] 유저가 입력한 특별 요청사항을 프롬프트에 합칩니다.
-                    user_prompt = f"""
-                    이 사진을 분석해서 인스타그램과 블로그 마케팅 문구를 JSON 형식으로 작성해줘.
-                    
-                    [특별 요청 사항]
-                    {special_request if special_request else "없음 (기본 지침에 충실할 것)"}
-                    
-                    [출력 형식 가이드]
-                    - 결과물에 JSON 구조({{...}})는 절대 노출하지 말고 내용만 보여줄 것.
-                    - 문단 나누기와 줄 바꿈을 적극 활용할 것.
-                    """
-                    
-                    response = client.models.generate_content(
-                        model=API_MODEL, 
-                        config={
-                            'system_instruction': editable_instruction,
-                            'response_mime_type': 'application/json'
-                        },
-                        contents=[user_prompt, input_image]
-                    )
-                    
-                    res_data = json.loads(response.text)
-                    insta_part = res_data.get("instagram", "")
-                    blog_part = res_data.get("blog", "")
+# --- 내부 보조 함수 (가독성을 위해 분리) ---
+def process_and_display_results(image, cat, instruction, request, link):
+    with st.status("🎨 AI가 작성 중...", expanded=False):
+        try:
+            api_key = ""
+            if "GEMINI_API_KEY" in st.secrets:
+                api_key = str(st.secrets["GEMINI_API_KEY"])
+            if not api_key and "gemini" in st.secrets and "api_key" in st.secrets["gemini"]:
+                api_key = str(st.secrets["gemini"]["api_key"])
+            if not api_key:
+                st.error("GEMINI_API_KEY가 설정되지 않았습니다.")
+                return
 
-                    # 히스토리 저장
-                    save_to_history(category, insta_part, blog_part, final_image_link)
+            prompt = (
+                f"{instruction}\n\n"
+                "아래 형식의 JSON만 출력해줘. 설명 문장 금지.\n"
+                '{"instagram":"...", "blog":"..."}\n\n'
+                f"[카테고리]\n{cat}\n\n"
+                f"[추가 요청]\n{request if request else '없음'}"
+            )
 
-                    st.success("분석 완료! 기록되었습니다.")
-                    
-                    # 결과 출력 (st.code 활용하여 복사 버튼 제공)
-                    tab1, tab2 = st.tabs(["📸 인스타그램", "✍️ 네이버 블로그"])
-                    with tab1:
-                        st.code(insta_part, language="text")
-                        st.link_button("🚀 인스타그램 열기", "https://www.instagram.com/studio_gridaga", use_container_width=True)
-                    with tab2:
-                        st.code(blog_part, language="text")
-                        st.link_button("📝 네이버 블로그 글쓰기", "https://blog.naver.com/postwrite", use_container_width=True)
+            client = genai.Client(api_key=api_key)
+            response = client.models.generate_content(
+                model=API_MODEL,
+                contents=[prompt, image]
+            )
+            raw_text = (response.text or "").strip()
+            if not raw_text:
+                st.error("AI 응답이 비어 있습니다. 잠시 후 다시 시도해주세요.")
+                return
 
-                except Exception as e:
-                    st.error(f"분석 중 에러 발생: {e}")
+            res_data = _parse_marketing_json(raw_text)
+            insta_text = str(res_data.get("instagram", "")).strip()
+            blog_text = str(res_data.get("blog", "")).strip()
+            if not insta_text or not blog_text:
+                st.error("AI 응답 형식이 올바르지 않습니다. 다시 시도해주세요.")
+                return
+        except Exception as e:
+            st.error(f"AI 생성 중 오류: {e}")
+            return
+    
+    st.success("✅ 완성되었습니다!")
+    t1, t2 = st.tabs(["📸 인스타", "📝 블로그"])
+    with t1:
+        st.code(insta_text, language="text")
+        st.link_button("인스타그램 바로가기", "https://instagram.com", use_container_width=True)
+    with t2:
+        st.code(blog_text, language="text")
+        st.link_button("블로그 바로가기", "https://blog.naver.com", use_container_width=True)
+
+    saved = save_to_history(cat, insta_text, blog_text, link)
+    if saved:
+        st.caption("히스토리에 저장되었습니다.")
+
+
+def _parse_marketing_json(text):
+    """Gemini 응답에서 JSON 블록을 안전하게 파싱"""
+    cleaned = text.strip()
+    # ```json ... ``` 형태 대응
+    cleaned = re.sub(r"^```json\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^```\s*", "", cleaned)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        m = re.search(r"\{[\s\S]*\}", text)
+        if not m:
+            return {}
+        try:
+            return json.loads(m.group(0))
+        except Exception:
+            return {}
+
+
+def display_history_ui():
+    st.subheader("📜 생성 히스토리")
+    df = get_history_data()
+    if df is None or df.empty:
+        st.info("저장된 히스토리가 없습니다.")
+        return
+
+    for _, row in df.head(30).iterrows():
+        with st.container(border=True):
+            st.caption(f"{row.get('date', '')} | {row.get('category', '')}")
+            st.markdown("**인스타**")
+            st.code(str(row.get("instagram", "")), language="text")
+            st.markdown("**블로그**")
+            st.code(str(row.get("blog", "")), language="text")

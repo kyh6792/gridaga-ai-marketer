@@ -4,46 +4,110 @@ import pandas as pd
 from datetime import datetime
 
 def get_conn():
-    """구글 시트 연결 객체 생성 (섹션 이름 매칭)"""
-    # secrets.toml의 [connections.google_auth]를 찾아갑니다.
-    return st.connection("google_auth", type=GSheetsConnection)
+    return st.connection("google_drive", type=GSheetsConnection)
+
+
+def get_sheet_url():
+    """시트 접근용 URL/ID를 secrets에서 안전하게 가져옵니다."""
+    try:
+        if "GSHEETS_URL" in st.secrets:
+            return st.secrets["GSHEETS_URL"]
+        if "connections" in st.secrets and "google_drive" in st.secrets["connections"]:
+            conn_cfg = st.secrets["connections"]["google_drive"]
+            if "spreadsheet" in conn_cfg:
+                return conn_cfg["spreadsheet"]
+    except Exception:
+        pass
+    return ""
+
+
+def get_prompt_worksheet():
+    """프롬프트 워크시트명(기본: prompt)"""
+    try:
+        if "PROMPT_WORKSHEET" in st.secrets:
+            return str(st.secrets["PROMPT_WORKSHEET"])
+    except Exception:
+        pass
+    return "prompt"
+
+
+def _read_prompt_sheet(conn, sheet_url):
+    """프롬프트 구조(category/prompt)를 가진 워크시트를 찾아 읽습니다."""
+    configured_ws = get_prompt_worksheet()
+    candidate_worksheets = [configured_ws, "prompts", "Tab", "sheet1", "Sheet1"]
+    last_error = None
+
+    for ws in candidate_worksheets:
+        try:
+            df = conn.read(spreadsheet=sheet_url, worksheet=ws, ttl=0)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                if "category" in df.columns and "prompt" in df.columns:
+                    return df, ws
+        except Exception as e:
+            last_error = e
+
+    # 마지막 fallback: worksheet 미지정 읽기
+    try:
+        df = conn.read(spreadsheet=sheet_url, ttl=0)
+        if isinstance(df, pd.DataFrame) and "category" in df.columns and "prompt" in df.columns:
+            return df, None
+    except Exception as e:
+        last_error = e
+
+    if last_error:
+        raise last_error
+    return pd.DataFrame(), None
+
 
 def load_prompts_from_sheet(default_prompts):
     try:
         conn = get_conn()
-        # [수정] secrets 계층 구조에 맞춰 URL 참조
-        sheet_url = st.secrets["connections"]["google_auth"]["spreadsheet"]
-        
-        df = conn.read(spreadsheet=sheet_url, ttl=0)
+        sheet_url = get_sheet_url()
+        if not sheet_url:
+            return default_prompts
+
+        df, _ = _read_prompt_sheet(conn, sheet_url)
         if 'category' in df.columns and 'prompt' in df.columns:
             return dict(zip(df['category'], df['prompt']))
         return default_prompts
     except Exception as e:
-        st.error(f"시트 로드 에러: {e}")
+        st.error(f"시트 로드 에러: {repr(e)}")
         return default_prompts
 
 def save_prompt_to_sheet(category, new_prompt):
     try:
         conn = get_conn()
-        sheet_url = st.secrets["connections"]["google_auth"]["spreadsheet"]
+        sheet_url = get_sheet_url()
+        if not sheet_url:
+            st.error("시트 URL 설정을 찾을 수 없습니다.")
+            return
         
-        df = conn.read(spreadsheet=sheet_url, ttl=0)
+        df, worksheet = _read_prompt_sheet(conn, sheet_url)
+        if df.empty:
+            st.error("프롬프트 시트를 찾지 못했습니다. 시트 탭과 컬럼(category, prompt)을 확인해주세요.")
+            return
         df.loc[df['category'] == category, 'prompt'] = new_prompt
-        conn.update(spreadsheet=sheet_url, data=df)
+        if worksheet:
+            conn.update(spreadsheet=sheet_url, worksheet=worksheet, data=df)
+        else:
+            conn.update(spreadsheet=sheet_url, data=df)
         st.cache_data.clear()
     except Exception as e:
-        st.error(f"프롬프트 저장 에러: {e}")
+        st.error(f"프롬프트 저장 에러: {repr(e)}")
     
 def save_to_history(category, insta_text, blog_text, image_link=""): # image_link 인자 추가
     """마케팅 생성 결과를 구글 시트 'history' 탭에 누적 저장"""
     try:
         conn = get_conn()
-        sheet_url = st.secrets["connections"]["google_auth"]["spreadsheet"]
+        sheet_url = get_sheet_url()
+        if not sheet_url:
+            st.error("시트 URL 설정을 찾을 수 없습니다.")
+            return False
         
         # 1. 기존 데이터 읽기 (없으면 빈 DF 생성)
         try:
             df_history = conn.read(spreadsheet=sheet_url, worksheet="history", ttl=0)
-        except:
+        except Exception:
             # 시트 헤더에 image_link가 있는지 확인 필요
             df_history = pd.DataFrame(columns=["date", "category", "instagram", "blog", "image_link"])
         
@@ -68,10 +132,11 @@ def get_history_data():
     """히스토리 탭의 전체 데이터를 가져옴 (최신순)"""
     try:
         conn = get_conn()
-        # [수정] URL 참조 경로 변경
-        sheet_url = st.secrets["connections"]["google_auth"]["spreadsheet"]
+        sheet_url = get_sheet_url()
+        if not sheet_url:
+            return pd.DataFrame()
         
         df = conn.read(spreadsheet=sheet_url, worksheet="history", ttl=0)
         return df.sort_values(by="date", ascending=False)
-    except:
+    except Exception:
         return pd.DataFrame()
