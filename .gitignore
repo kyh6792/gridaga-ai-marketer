@@ -1,0 +1,16 @@
+﻿# Streamlit secrets (보안 필수!)
+.streamlit/secrets.toml
+
+# Python 가상환경
+venv/
+.env
+__pycache__/
+*.pyc
+*.bak
+
+# OS 생성 파일
+.DS_Store
+Thumbs.db
+
+# 로컬 테스트용 데이터
+custom_prompts.json

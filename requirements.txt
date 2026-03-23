@@ -1,0 +1,9 @@
+streamlit
+google-genai
+Pillow
+python-dotenv
+st-gsheets-connection
+pandas
+google-api-python-client 
+google-auth
+pillow
