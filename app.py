@@ -1,7 +1,13 @@
 import streamlit as st
 import streamlit.components.v1 as components
 from datetime import datetime, timedelta
-from core.ui import display_intro, apply_owner_dashboard_style, render_owner_brand_header, render_owner_menu_grid
+from core.ui import display_intro, render_owner_brand_header, render_owner_menu_grid
+try:
+    from core.ui import apply_owner_dashboard_style
+except ImportError:
+    # 배포 파일 불일치 시에도 앱이 죽지 않도록 안전 처리
+    def apply_owner_dashboard_style():
+        return None
 from core.marketer import run_marketing_ui  # 마케팅팀 모듈 호출
 from core.curriculum import run_curriculum_ui
 from core.finance import run_finance_ui
