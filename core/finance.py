@@ -135,13 +135,21 @@ def run_finance_ui():
     year_view = view[view["year_month"].str.startswith(year_prefix, na=False)].copy()
     march_view = view[view["year_month"] == ym_march].copy()
 
+    tx_filter = st.radio("거래 유형", ["전체", "등록만", "재등록만"], horizontal=True)
+    if tx_filter == "등록만":
+        year_view = year_view[year_view["event_type"] == "등록"].copy()
+        march_view = march_view[march_view["event_type"] == "등록"].copy()
+    elif tx_filter == "재등록만":
+        year_view = year_view[year_view["event_type"] == "재등록"].copy()
+        march_view = march_view[march_view["event_type"] == "재등록"].copy()
+
     annual_total = int(year_view["amount"].sum()) if not year_view.empty else 0
     march_total = int(march_view["amount"].sum()) if not march_view.empty else 0
     year_reg_count = int((year_view["event_type"] == "등록").sum()) if not year_view.empty else 0
     year_rereg_count = int((year_view["event_type"] == "재등록").sum()) if not year_view.empty else 0
 
     st.caption(
-        f"올해 `{year}` · 3월 `{ym_march}` · "
+        f"필터 `{tx_filter}` · 올해 `{year}` · 3월 `{ym_march}` · "
         f"연매출 **{annual_total:,}원** · 3월 **{march_total:,}원** · "
         f"등록 **{year_reg_count}건** · 재등록 **{year_rereg_count}건**"
     )

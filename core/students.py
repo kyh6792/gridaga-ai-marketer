@@ -208,43 +208,73 @@ def save_student_to_sheet(
     try:
         conn = get_conn()
         df = _safe_read(conn, worksheet="students", ttl=0)
-        
-        # 1. 고유 ID 생성 (26001...)
-        new_id = generate_student_id(df)
-        # 기존 동일 연락처/이름 존재 여부로 등록 유형 분류
+
+        if df is None or df.empty:
+            df = pd.DataFrame(columns=["ID", "이름", "연락처", "등록일", "수강코스", "총 횟수", "잔여 횟수", "상태", "메모"])
+
+        # 기존 동일 연락처/이름 존재 여부로 등록 유형 분류 (재등록이면 기존 ID 유지)
         is_rereg = False
-        if df is not None and not df.empty and "이름" in df.columns and "연락처" in df.columns:
+        existing_row_idx = None
+        target_id = None
+        if "이름" in df.columns and "연락처" in df.columns and not df.empty:
             same = df[
                 (df["이름"].astype(str).str.strip() == str(name).strip())
                 & (df["연락처"].astype(str).str.strip() == str(contact).strip())
-            ]
-            is_rereg = not same.empty
-        
-        # 2. 입력값 정리
+            ].copy()
+            if not same.empty:
+                is_rereg = True
+                # 가장 최근 등록일 기준으로 대상 선택 (없으면 마지막 행)
+                if "등록일" in same.columns:
+                    same = same.sort_values(by="등록일", ascending=False)
+                existing_row_idx = int(same.index[0])
+                target_id = str(df.at[existing_row_idx, "ID"]).strip()
+
+        # 신규 등록인 경우에만 새 ID 발급
+        if not is_rereg:
+            target_id = generate_student_id(df)
+
+        # 입력값 정리
         val_int = int(total_sessions)
-        
-        # 3. 새 데이터 생성 (ID 컬럼 추가)
-        new_row = pd.DataFrame([{
-            "ID": new_id,
-            "이름": str(name),
-            "연락처": str(contact),
-            "등록일": reg_date.strftime("%Y-%m-%d"),
-            "수강코스": str(course),
-            "총 횟수": str(val_int),
-            "잔여 횟수": str(val_int),
-            "상태": "재원", # 기본값은 '재원'
-            "메모": str(memo)
-        }])
-        
-        # 4. 합치기 및 업데이트
-        if not df.empty:
-            df = df.astype(str)
-            updated_df = pd.concat([df, new_row], ignore_index=True)
+
+        # 재등록: 기존 행 업데이트 / 신규: 새 행 추가
+        if is_rereg and existing_row_idx is not None:
+            for col in ["ID", "이름", "연락처", "등록일", "수강코스", "총 횟수", "잔여 횟수", "상태", "메모"]:
+                if col not in df.columns:
+                    df[col] = ""
+            df.at[existing_row_idx, "ID"] = str(target_id)
+            df.at[existing_row_idx, "이름"] = str(name)
+            df.at[existing_row_idx, "연락처"] = str(contact)
+            df.at[existing_row_idx, "등록일"] = reg_date.strftime("%Y-%m-%d")
+            df.at[existing_row_idx, "수강코스"] = str(course)
+            df.at[existing_row_idx, "총 횟수"] = str(val_int)
+            df.at[existing_row_idx, "잔여 횟수"] = str(val_int)
+            df.at[existing_row_idx, "상태"] = "재원"
+            df.at[existing_row_idx, "메모"] = str(memo)
+            updated_df = df.copy()
         else:
-            updated_df = new_row
-            
+            new_row = pd.DataFrame([{
+                "ID": str(target_id),
+                "이름": str(name),
+                "연락처": str(contact),
+                "등록일": reg_date.strftime("%Y-%m-%d"),
+                "수강코스": str(course),
+                "총 횟수": str(val_int),
+                "잔여 횟수": str(val_int),
+                "상태": "재원",
+                "메모": str(memo)
+            }])
+            if not df.empty:
+                df = df.astype(str)
+                updated_df = pd.concat([df, new_row], ignore_index=True)
+            else:
+                updated_df = new_row
+
+        # 저장
         _safe_update(conn, worksheet="students", data=updated_df)
-        st.success(f"🎊 [ID: {new_id}] {name}님 등록 완료!")
+        if is_rereg:
+            st.success(f"🔁 [ID 유지: {target_id}] {name}님 재등록 완료!")
+        else:
+            st.success(f"🎊 [ID: {target_id}] {name}님 등록 완료!")
 
         # 재무 거래 자동 누적
         pay_note = f"{course} / {val_int}회"
@@ -252,8 +282,11 @@ def save_student_to_sheet(
             pay_note += f" / 할인:{discount_type}"
         if event_name:
             pay_note += f" / 이벤트:{event_name}"
+        if is_rereg:
+            pay_note += " / 재등록(ID유지)"
+
         record_registration_payment(
-            student_id=new_id,
+            student_id=target_id,
             student_name=name,
             course=course,
             event_type="재등록" if is_rereg else "등록",
@@ -265,7 +298,7 @@ def save_student_to_sheet(
             discount_amount=discount_amount,
             event_name=event_name,
         )
-        
+
     except Exception as e:
         st.error(f"등록 중 에러 발생: {e}")
 
@@ -280,6 +313,32 @@ def _normalize_student_status(series_or_val):
         return s.replace("", "재원")
     v = str(series_or_val).strip() if series_or_val is not None and not pd.isna(series_or_val) else ""
     return v if v else "재원"
+
+
+def _get_latest_reg_event_map(ttl=20):
+    """student_id -> 최근 등록유형(등록/재등록) 맵."""
+    try:
+        conn = get_conn()
+        tx = _safe_read(conn, worksheet="finance_transactions", ttl=ttl)
+        if tx is None or tx.empty:
+            return {}
+        needed = {"student_id", "event_type", "date"}
+        if not needed.issubset(set(tx.columns)):
+            return {}
+
+        view = tx.copy()
+        view["student_id"] = pd.to_numeric(view["student_id"], errors="coerce").fillna(0).astype(int).astype(str)
+        view["event_type"] = view["event_type"].astype(str).str.strip()
+        view = view[view["event_type"].isin(["등록", "재등록"])].copy()
+        if view.empty:
+            return {}
+
+        # 최신 기록 1건만 학생별 유지
+        view = view.sort_values("date", ascending=False)
+        latest = view.drop_duplicates(subset=["student_id"], keep="first")
+        return dict(zip(latest["student_id"], latest["event_type"]))
+    except Exception:
+        return {}
 
 
 def update_student_status(student_id, new_status, note_append=None):
@@ -329,6 +388,8 @@ def display_student_list():
                 df["상태"] = "재원"
             df["상태"] = _normalize_student_status(df["상태"])
             
+            reg_event_map = _get_latest_reg_event_map(ttl=20)
+
             # 2. 상단 필터 UI
             st.markdown("---")
             view_option = st.radio("🔍 보기 설정", ["재원생만", "전체 명단", "퇴원/휴원"], horizontal=True)
@@ -354,12 +415,14 @@ def display_student_list():
             for _, row in display_df.iterrows():
                 stu_status = str(row["상태"]).strip() if pd.notna(row["상태"]) else "재원"
                 status_color = "green" if stu_status == "재원" else "gray"
+                reg_kind = reg_event_map.get(str(row["ID"]), "")
+                reg_badge = " · 🆕 등록" if reg_kind == "등록" else (" · 🔁 재등록" if reg_kind == "재등록" else "")
                 
                 # 카드 테두리 시작
                 with st.container(border=True):
                     # [26001] 이름 (상태배지)
                     st.markdown(f"### `{row['ID']}` **{row['이름']}** :{status_color}[[{stu_status}]]")
-                    st.caption(f"🎨 {row['수강코스']} | 📱 {row['연락처']}")
+                    st.caption(f"🎨 {row['수강코스']} | 📱 {row['연락처']}{reg_badge}")
 
                     # 잔여 횟수
                     rem_count = int(row['잔여 횟수'])
@@ -552,6 +615,36 @@ def create_attendance_request(student_id):
         return False, f"출석 요청 생성 실패: {e}"
 
 
+def cancel_pending_attendance_request(student_id):
+    """원생 본인이 자신의 pending 요청을 취소합니다."""
+    try:
+        conn = get_conn()
+        req_df = _read_or_init_attendance_requests(conn)
+        if req_df.empty:
+            return False, "취소할 요청이 없습니다."
+        if "student_id" not in req_df.columns or "status" not in req_df.columns:
+            return False, "요청 데이터 형식이 올바르지 않습니다."
+
+        target = req_df[
+            (req_df["student_id"].astype(str) == str(student_id))
+            & (req_df["status"].astype(str) == "pending")
+        ]
+        if target.empty:
+            return False, "현재 취소 가능한 승인 대기 요청이 없습니다."
+
+        # 가장 최근 요청 1건만 취소
+        if "time" in target.columns:
+            target = target.sort_values(by="time", ascending=False)
+        row_idx = int(target.index[0])
+        req_df.at[row_idx, "status"] = "cancelled"
+        req_df.at[row_idx, "approved_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        _safe_update(conn, worksheet="attendance_requests", data=req_df)
+        invalidate_owner_dashboard_sheet_caches()
+        return True, "출석 요청이 취소되었습니다."
+    except Exception as e:
+        return False, f"요청 취소 실패: {e}"
+
+
 def get_pending_attendance_requests(limit=20, force_refresh: bool = False):
     """승인 대기 중인 출석 요청 목록을 최신순으로 반환합니다. (대시보드는 세션 캐시)"""
     try:
@@ -619,6 +712,32 @@ def approve_attendance_request(request_id):
         return True, f"{student_name}님 승인 완료! 남은 횟수: {result}회"
     except Exception as e:
         return False, f"승인 처리 실패: {e}"
+
+
+def reject_attendance_request(request_id):
+    """원장이 pending 요청을 거절 처리합니다. (차감 없음)"""
+    try:
+        conn = get_conn()
+        req_df = _read_or_init_attendance_requests(conn)
+        if req_df.empty:
+            return False, "거절할 요청이 없습니다."
+
+        idx = req_df.index[req_df["request_id"].astype(str) == str(request_id)].tolist()
+        if not idx:
+            return False, "요청을 찾을 수 없습니다."
+        row_idx = idx[0]
+
+        if str(req_df.at[row_idx, "status"]) != "pending":
+            return False, "이미 처리된 요청입니다."
+
+        req_df.at[row_idx, "status"] = "rejected"
+        req_df.at[row_idx, "approved_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        _safe_update(conn, worksheet="attendance_requests", data=req_df)
+        invalidate_owner_dashboard_sheet_caches()
+        student_name = str(req_df.at[row_idx, "student_name"])
+        return True, f"{student_name}님 요청을 거절했습니다."
+    except Exception as e:
+        return False, f"거절 처리 실패: {e}"
 
 
 def save_attendance_log(student_id, student_name, remain_count, request_meta=None):

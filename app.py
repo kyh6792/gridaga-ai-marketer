@@ -3,6 +3,7 @@ import streamlit.components.v1 as components
 from datetime import datetime, timedelta
 import base64
 from pathlib import Path
+import pandas as pd
 
 # 배포본 core/ui.py 버전이 달라도 ImportError 나지 않게 모듈 단위로 로드
 import core.ui as _ui
@@ -27,14 +28,53 @@ apply_owner_dashboard_style = getattr(_ui, "apply_owner_dashboard_style", _noop)
 from core.marketer import run_marketing_ui  # 마케팅팀 모듈 호출
 from core.curriculum import run_curriculum_ui
 from core.finance import run_finance_ui
-from core.students import (
-    run_student_ui,
-    get_recent_attendance_logs,
-    create_attendance_request,
-    get_pending_attendance_requests,
-    approve_attendance_request,
-    get_failed_log_requests,
-    retry_failed_log_request,
+import core.students as _students
+
+
+def _stub_cancel_pending_attendance_request(student_id):
+    return False, "요청 취소 기능을 불러오지 못했습니다. 앱을 새로고침해 주세요."
+
+
+def _stub_reject_attendance_request(request_id):
+    return False, "요청 거절 기능을 불러오지 못했습니다. 앱을 새로고침해 주세요."
+
+
+run_student_ui = getattr(_students, "run_student_ui", _noop)
+get_recent_attendance_logs = getattr(_students, "get_recent_attendance_logs", lambda *args, **kwargs: [])
+create_attendance_request = getattr(
+    _students,
+    "create_attendance_request",
+    lambda *args, **kwargs: (False, "출석 요청 기능을 불러오지 못했습니다."),
+)
+cancel_pending_attendance_request = getattr(
+    _students,
+    "cancel_pending_attendance_request",
+    _stub_cancel_pending_attendance_request,
+)
+get_pending_attendance_requests = getattr(
+    _students,
+    "get_pending_attendance_requests",
+    lambda *args, **kwargs: pd.DataFrame(),
+)
+approve_attendance_request = getattr(
+    _students,
+    "approve_attendance_request",
+    lambda *args, **kwargs: (False, "승인 기능을 불러오지 못했습니다."),
+)
+reject_attendance_request = getattr(
+    _students,
+    "reject_attendance_request",
+    _stub_reject_attendance_request,
+)
+get_failed_log_requests = getattr(
+    _students,
+    "get_failed_log_requests",
+    lambda *args, **kwargs: pd.DataFrame(),
+)
+retry_failed_log_request = getattr(
+    _students,
+    "retry_failed_log_request",
+    lambda *args, **kwargs: (False, "로그 재시도 기능을 불러오지 못했습니다."),
 )
 from core.schedule import get_today_schedule_by_student
 # --- 1. 페이지 설정 ---
@@ -370,6 +410,17 @@ def render_student_entry():
             st.session_state["student_message_type"] = "error"
         st.rerun()
 
+    if st.button("🛑 요청 취소", use_container_width=True, key="cancel_attendance_request"):
+        student_id = st.session_state.get("student_id_input", "").strip()
+        if not student_id:
+            st.session_state["student_message"] = "취소하려면 ID를 먼저 입력해주세요."
+            st.session_state["student_message_type"] = "error"
+            st.rerun()
+        ok, msg = cancel_pending_attendance_request(student_id)
+        st.session_state["student_message"] = str(msg)
+        st.session_state["student_message_type"] = "success" if ok else "error"
+        st.rerun()
+
     st.markdown("---")
     if st.button("⬅️ 처음으로", use_container_width=True, key="back_from_student"):
         st.session_state["entry_mode"] = None
@@ -421,9 +472,16 @@ def render_owner_menu():
         failed_log_requests = get_failed_log_requests(limit=20)
         recent_logs = get_recent_attendance_logs(limit=3)
         pending_count = len(pending_requests) if not pending_requests.empty else 0
-        pending_bg = "rgba(179, 123, 94, 0.72)" if pending_count > 0 else "rgba(232, 212, 190, 0.68)"
-        pending_border = "#8F5C44" if pending_count > 0 else "#B78F6A"
-        pending_text = "#FFF8F2" if pending_count > 0 else "#4A3526"
+        pending_bg = "rgba(255, 167, 145, 0.26)" if pending_count > 0 else "rgba(232, 212, 190, 0.24)"
+        pending_border = "#F2A596" if pending_count > 0 else "#CBB39A"
+        pending_text = "#6F2E27" if pending_count > 0 else "#5B4638"
+        if isinstance(recent_logs, pd.DataFrame):
+            recent_has_value = not recent_logs.empty
+        else:
+            recent_has_value = bool(recent_logs)
+        recent_bg = "rgba(156, 216, 255, 0.24)" if recent_has_value else "rgba(232, 212, 190, 0.22)"
+        recent_border = "#8FCFF2" if recent_has_value else "#CBB39A"
+        recent_text = "#224C66" if recent_has_value else "#5B4638"
 
         # 승인대기 수 / 최근 갱신 반반 카드 (모바일 고정)
         components.html(
@@ -433,9 +491,9 @@ def render_owner_menu():
                     <div style="font-size:12px;color:{pending_text};">승인대기 수</div>
                     <div style="font-size:20px;font-weight:700;color:{pending_text};line-height:1.1;">{pending_count}</div>
                 </div>
-                <div style="border:1px solid #B78F6A;border-radius:12px;background:rgba(232,212,190,0.62);padding:7px;min-height:66px;">
-                    <div style="font-size:12px;color:#6D5543;">최근 갱신</div>
-                    <div style="font-size:20px;font-weight:700;color:#4A3526;line-height:1.1;">{datetime.now().strftime('%H:%M')}</div>
+                <div style="border:1px solid {recent_border};border-radius:12px;background:{recent_bg};padding:7px;min-height:66px;">
+                    <div style="font-size:12px;color:{recent_text};">최근 갱신</div>
+                    <div style="font-size:20px;font-weight:700;color:{recent_text};line-height:1.1;">{datetime.now().strftime('%H:%M')}</div>
                 </div>
             </div>
             """,
@@ -454,13 +512,23 @@ def render_owner_menu():
                 with st.container(border=True):
                     st.markdown(f"**{student_name}** (`{student_id}`)")
                     st.caption(f"요청: {req_time}")
-                    if st.button("승인", key=f"approve_req_{req_id}", use_container_width=True):
-                        ok, msg = approve_attendance_request(req_id)
-                        if ok:
-                            st.success(msg)
-                        else:
-                            st.error(msg)
-                        st.rerun()
+                    c_ok, c_no = st.columns(2, gap="small")
+                    with c_ok:
+                        if st.button("승인", key=f"approve_req_{req_id}", use_container_width=True):
+                            ok, msg = approve_attendance_request(req_id)
+                            if ok:
+                                st.success(msg)
+                            else:
+                                st.error(msg)
+                            st.rerun()
+                    with c_no:
+                        if st.button("거절", key=f"reject_req_{req_id}", use_container_width=True):
+                            ok, msg = reject_attendance_request(req_id)
+                            if ok:
+                                st.success(msg)
+                            else:
+                                st.error(msg)
+                            st.rerun()
 
         st.markdown("### 최근 처리")
         if recent_logs.empty:
@@ -573,17 +641,23 @@ def render_owner_menu():
         st.markdown(
             """
             <style>
-            [data-testid="stAppViewContainer"] .block-container {
-                animation: slideFromRight 280ms ease-out;
+            /* owner-main-split-anchor 다음 형제 = 2열 래퍼, 그 두 번째 자식 = 오른쪽 상세패널 */
+            span.owner-main-split-anchor
+              + div[data-testid="stHorizontalBlock"] > div:nth-child(2)
+              > div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlockBorderWrapper"] {
+                animation: ownerPanelSlideIn 360ms cubic-bezier(0.22, 0.8, 0.2, 1);
+                will-change: transform, opacity, filter;
             }
-            @keyframes slideFromRight {
+            @keyframes ownerPanelSlideIn {
                 from {
-                    transform: translateX(22px);
-                    opacity: 0.75;
+                    transform: translateX(42px);
+                    opacity: 0.15;
+                    filter: blur(2px);
                 }
                 to {
                     transform: translateX(0);
                     opacity: 1;
+                    filter: blur(0);
                 }
             }
             </style>
