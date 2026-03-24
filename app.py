@@ -486,18 +486,18 @@ def render_owner_menu():
         # 승인대기 수 / 최근 갱신 반반 카드 (모바일 고정)
         components.html(
             f"""
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:0 0 14px 0;">
-                <div style="border:1px solid {pending_border};border-radius:12px;background:{pending_bg};padding:7px;min-height:66px;">
-                    <div style="font-size:12px;color:{pending_text};">승인대기 수</div>
-                    <div style="font-size:20px;font-weight:700;color:{pending_text};line-height:1.1;">{pending_count}</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:7px;margin:0 0 10px 0;">
+                <div style="border:1px solid {pending_border};border-radius:9px;background:{pending_bg};padding:5px;min-height:44px;">
+                    <div style="font-size:10px;color:{pending_text};">승인대기 수</div>
+                    <div style="font-size:14px;font-weight:700;color:{pending_text};line-height:1.05;">{pending_count}</div>
                 </div>
-                <div style="border:1px solid {recent_border};border-radius:12px;background:{recent_bg};padding:7px;min-height:66px;">
-                    <div style="font-size:12px;color:{recent_text};">최근 갱신</div>
-                    <div style="font-size:20px;font-weight:700;color:{recent_text};line-height:1.1;">{datetime.now().strftime('%H:%M')}</div>
+                <div style="border:1px solid {recent_border};border-radius:9px;background:{recent_bg};padding:5px;min-height:44px;">
+                    <div style="font-size:10px;color:{recent_text};">최근 갱신</div>
+                    <div style="font-size:14px;font-weight:700;color:{recent_text};line-height:1.05;">{datetime.now().strftime('%H:%M')}</div>
                 </div>
             </div>
             """,
-            height=98,
+            height=66,
         )
 
         st.markdown("### 승인 하기")
@@ -710,7 +710,7 @@ def render_owner_menu():
                     }} catch (e) {{}}
                     const hb = findOwnerMainHorizontal(doc);
                     if (!hb) return;
-                    const narrow = win.innerWidth <= 900;
+                    const narrow = win.innerWidth <= 760;
                     hb.style.flexDirection = narrow ? "column" : "row";
                     hb.style.alignItems = narrow ? "stretch" : "";
                     const gap = narrow ? "0.75rem" : "";
