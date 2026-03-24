@@ -25,9 +25,6 @@ render_owner_brand_header = getattr(_ui, "render_owner_brand_header", _noop)
 render_owner_menu_grid = getattr(_ui, "render_owner_menu_grid", _stub_owner_menu_grid)
 apply_owner_dashboard_style = getattr(_ui, "apply_owner_dashboard_style", _noop)
 
-from core.marketer import run_marketing_ui  # 마케팅팀 모듈 호출
-from core.curriculum import run_curriculum_ui
-from core.finance import run_finance_ui
 import core.students as _students
 
 
@@ -121,7 +118,6 @@ def init_entry_state():
         "owner_prev_pending_count": 0,
         "owner_login_at": "",
         "owner_menu_index": 0,
-        "owner_prev_menu_index": 0,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -464,6 +460,23 @@ def render_owner_auth():
 
 
 def render_owner_menu():
+    try:
+        from core.sheet_backup import maybe_run_daily_sheet_backup
+
+        maybe_run_daily_sheet_backup()
+    except Exception:
+        pass
+
+    # 메뉴 전환 시 lazy import 비용이 한 박자처럼 느껴지지 않도록, 원장 화면에서 1회만 선로딩
+    if not st.session_state.get("_owner_feature_modules_preloaded"):
+        try:
+            import core.marketer  # noqa: F401
+            import core.finance  # noqa: F401
+            import core.curriculum  # noqa: F401
+        except Exception:
+            pass
+        st.session_state["_owner_feature_modules_preloaded"] = True
+
     apply_owner_dashboard_style()
     render_owner_brand_header()
 
@@ -600,75 +613,49 @@ def render_owner_menu():
         unsafe_allow_html=True,
     )
 
-    # 메뉴 상태를 먼저 확정해서 본문 교체를 우선 처리
-    selected_idx = int(st.session_state.get("owner_menu_index", 0))
-    if selected_idx < 0 or selected_idx > 3:
-        selected_idx = 0
-    prev_idx = int(st.session_state.get("owner_prev_menu_index", selected_idx))
-    menu_changed = selected_idx != prev_idx
-    st.session_state["owner_prev_menu_index"] = selected_idx
-    st.query_params["owner_menu_idx"] = str(selected_idx)
-
     left_col, right_col = st.columns([1, 1], gap="large")
 
-    # 메뉴 버튼이 먼저 실행되어야 같은 실행에서 오른쪽 패널이 갱신됨 (이전엔 selected_idx가 먼저 잡혀 두 번 눌러야 했음)
+    # 버튼이 이 블록 안에서 session_state를 갱신하므로, 오른쪽 패널용 인덱스는 왼쪽(메뉴) 실행 *이후*에 읽어야 함.
+    # 그렇지 않으면 한 번 클릭 늦게(다음 클릭 때 이전 선택이) 반영되는 것처럼 보임.
     with left_col:
         with st.expander("운영 대시보드", expanded=True):
             render_owner_menu_grid(
                 st.session_state.get("owner_login_at", ""),
                 active_idx=int(st.session_state.get("owner_menu_index", 0)),
             )
-            # 메뉴 전환 직후에는 카드 렌더를 1회 건너뛰어 오른쪽 패널 교체를 우선
-            if not menu_changed:
-                # 2분 자동 갱신(카드 영역)
-                if hasattr(st, "fragment"):
-                    @st.fragment(run_every="120s")
-                    def auto_refresh_owner_cards():
-                        render_dashboard_cards()
-                    auto_refresh_owner_cards()
-                else:
+            # 메뉴 전환 때 카드를 건너뛰면 왼쪽 패널이 비어 보이고, 다음 리런까지 공백이 남을 수 있음
+            if hasattr(st, "fragment"):
+                @st.fragment(run_every="120s")
+                def auto_refresh_owner_cards():
                     render_dashboard_cards()
+
+                auto_refresh_owner_cards()
+            else:
+                render_dashboard_cards()
+
+    selected_idx = int(st.session_state.get("owner_menu_index", 0))
+    if selected_idx < 0 or selected_idx > 3:
+        selected_idx = 0
+    st.query_params["owner_menu_idx"] = str(selected_idx)
 
     with right_col:
         with st.container(border=True):
             if selected_idx == 0:
+                from core.marketer import run_marketing_ui
+
                 run_marketing_ui()
             elif selected_idx == 1:
                 run_student_ui()
             elif selected_idx == 2:
+                from core.finance import run_finance_ui
+
                 run_finance_ui()
             elif selected_idx == 3:
+                from core.curriculum import run_curriculum_ui
+
                 run_curriculum_ui()
 
     # 두 열 아래에 두어 2열 레이아웃이 깨지지 않게 함
-    if menu_changed:
-        st.markdown(
-            """
-            <style>
-            /* owner-main-split-anchor 다음 형제 = 2열 래퍼, 그 두 번째 자식 = 오른쪽 상세패널 */
-            span.owner-main-split-anchor
-              + div[data-testid="stHorizontalBlock"] > div:nth-child(2)
-              > div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlockBorderWrapper"] {
-                animation: ownerPanelSlideIn 360ms cubic-bezier(0.22, 0.8, 0.2, 1);
-                will-change: transform, opacity, filter;
-            }
-            @keyframes ownerPanelSlideIn {
-                from {
-                    transform: translateX(42px);
-                    opacity: 0.15;
-                    filter: blur(2px);
-                }
-                to {
-                    transform: translateX(0);
-                    opacity: 1;
-                    filter: blur(0);
-                }
-            }
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
-
     components.html(
         f"""
         <script>
@@ -762,12 +749,6 @@ def render_owner_menu():
 
 
 if st.session_state.get('intro_done'):
-    try:
-        from core.sheet_backup import maybe_run_daily_sheet_backup
-
-        maybe_run_daily_sheet_backup()
-    except Exception:
-        pass
     init_entry_state()
     sync_owner_session_from_query()
     # 원장 세션 1시간 만료 처리

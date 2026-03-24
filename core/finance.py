@@ -8,6 +8,17 @@ from core.curriculum import get_course_price_map
 
 WORKSHEET_NAME = "finance_transactions"
 EXPENSE_WORKSHEET_NAME = "finance_expenses"
+FINANCE_READ_TTL = 60
+_FINANCE_NEXT_READ_FRESH = "_finance_sheet_next_read_fresh"
+
+
+def mark_finance_sheet_dirty():
+    """시트 쓰기 직후 다음 재무 화면 조회 시 ttl 캐시를 쓰지 않도록 표시."""
+    st.session_state[_FINANCE_NEXT_READ_FRESH] = True
+
+
+def _finance_read_ttl():
+    return 0 if st.session_state.pop(_FINANCE_NEXT_READ_FRESH, False) else FINANCE_READ_TTL
 BASE_COLUMNS = [
     "tx_id",
     "date",
@@ -127,6 +138,7 @@ def record_registration_payment(
     }])
     updated = pd.concat([df, new_row], ignore_index=True) if not df.empty else new_row
     conn.update(worksheet=WORKSHEET_NAME, data=updated)
+    mark_finance_sheet_dirty()
 
 
 def run_finance_ui():
@@ -139,8 +151,9 @@ def run_finance_ui():
             _style()
     except Exception:
         pass
-    conn, df = _read_or_init_transactions(ttl=25)
-    ex_conn, ex_df = _read_or_init_expenses(ttl=25)
+    _ttl = _finance_read_ttl()
+    conn, df = _read_or_init_transactions(ttl=_ttl)
+    ex_conn, ex_df = _read_or_init_expenses(ttl=_ttl)
 
     view = df.copy() if df is not None else pd.DataFrame(columns=BASE_COLUMNS)
     view["amount"] = pd.to_numeric(view["amount"], errors="coerce").fillna(0).astype(int)
@@ -278,6 +291,7 @@ def run_finance_ui():
                         }])
                         updated = pd.concat([ex_view, new_row], ignore_index=True) if not ex_view.empty else new_row
                         ex_conn.update(worksheet=EXPENSE_WORKSHEET_NAME, data=updated)
+                        mark_finance_sheet_dirty()
                         st.success("비용이 저장되었습니다.")
                         st.rerun()
 

@@ -269,12 +269,18 @@ def process_and_display_results(
     st.success("✅ 완성되었습니다!")
     render_key = datetime.now().strftime("%Y%m%d%H%M%S%f")
     if output_mode == "both":
-        t1, t2 = st.tabs(["📸 인스타", "📝 블로그"])
-        with t1:
+        both_pick = st.segmented_control(
+            "결과 보기",
+            ["📸 인스타", "📝 블로그"],
+            default="📸 인스타",
+            key="mk_output_both_segment",
+            label_visibility="collapsed",
+        )
+        if both_pick == "📸 인스타":
             _render_copy_text_box("인스타 문구", insta_text, key=f"mk_out_insta_{render_key}")
             _render_copy_button(insta_text, key=f"mk_out_copy_insta_{render_key}")
             st.link_button("인스타그램 바로가기", "https://instagram.com", use_container_width=True)
-        with t2:
+        else:
             _render_copy_text_box("블로그 문구", blog_text, key=f"mk_out_blog_{render_key}")
             _render_copy_button(blog_text, key=f"mk_out_copy_blog_{render_key}")
             st.link_button("블로그 바로가기", "https://blog.naver.com", use_container_width=True)

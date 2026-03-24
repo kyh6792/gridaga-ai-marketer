@@ -3,9 +3,6 @@ import pandas as pd
 from datetime import datetime
 import time
 from core.database import get_conn
-from core.curriculum import get_course_options, get_course_price_map
-from core.schedule import run_schedule_ui
-from core.finance import record_registration_payment
 
 # 운영 대시보드(승인/최근처리): 메뉴 전환마다 시트 재조회 방지 — 쓰기·승인 시에만 무효화
 _OWNER_DASH_CACHE_TTL_SEC = 60
@@ -59,6 +56,9 @@ def _safe_update(conn, worksheet, data, retries=2):
     raise last_error
 
 def run_student_ui():
+    from core.curriculum import get_course_options, get_course_price_map
+    from core.schedule import run_schedule_ui
+
     st.subheader("👥 원생 관리 및 등록")
 
     def _suggest_sessions(course_name):
@@ -80,102 +80,108 @@ def run_student_ui():
         return 0
     
     with st.expander("👥 원생 관리 및 등록", expanded=True):
-        student_tab1, student_tab2, student_tab3 = st.tabs(["📝 신규 등록", "📋 원생 명부", "✏️ 명부 수정"])
+        student_section = st.segmented_control(
+            "원생 메뉴",
+            ["📝 신규 등록", "📋 원생 명부", "✏️ 명부 수정"],
+            default="📝 신규 등록",
+            key="student_main_section",
+            label_visibility="collapsed",
+        )
 
-    with student_tab1:
-        st.write("새로운 수강생 정보를 입력해주세요.")
-        
-        # 입력 폼
-        with st.form("student_reg_form", clear_on_submit=True):
-            # 코스가 시트에서 추가/수정되면 즉시 반영
-            course_options = get_course_options(force_refresh=False)
-            if "student_reg_course_prev" not in st.session_state:
-                st.session_state["student_reg_course_prev"] = ""
-            if "student_reg_total_prev" not in st.session_state:
-                st.session_state["student_reg_total_prev"] = 10
-
-            name = st.text_input("이름", placeholder="이름을 입력하세요")
-            contact = st.text_input("연락처", placeholder="010-0000-0000")
-            course = st.selectbox("수강 코스", course_options, key="student_reg_course")
-            suggested_sessions = _suggest_sessions(course)
-
-            prev_course = st.session_state.get("student_reg_course_prev", "")
-            prev_total = int(st.session_state.get("student_reg_total_prev", 10))
-            default_total = prev_total
-            if (not prev_course) or (course != prev_course and prev_total == _suggest_sessions(prev_course)):
-                default_total = suggested_sessions
-
-            total_sessions = st.number_input(
-                "결제 횟수 (횟수제)",
-                min_value=1,
-                value=int(default_total),
-                key="student_reg_total_input",
-            )
-            st.caption(f"추천 횟수: {suggested_sessions}회 (코스 기준, 직접 수정 가능)")
-
-            base_amount = int(_resolve_course_price(course))
-            discount_type = st.selectbox("할인 유형", ["없음", "정액 할인", "정률 할인(%)", "이벤트가 직접입력"])
-            event_name = ""
-            discount_value = 0
-            discount_amount = 0
-            final_amount = base_amount
-
-            if discount_type == "정액 할인":
-                discount_value = int(
-                    st.number_input("할인 금액(원)", min_value=0, value=0, step=1000)
-                )
-                discount_amount = min(discount_value, base_amount)
-                final_amount = max(0, base_amount - discount_amount)
-            elif discount_type == "정률 할인(%)":
-                discount_value = int(
-                    st.number_input("할인율(%)", min_value=0, max_value=100, value=0, step=5)
-                )
-                discount_amount = int(round(base_amount * (discount_value / 100.0)))
-                final_amount = max(0, base_amount - discount_amount)
-            elif discount_type == "이벤트가 직접입력":
-                event_name = st.text_input("이벤트명", placeholder="예: 봄맞이 원데이 20%")
-                final_amount = int(
-                    st.number_input("최종 결제금액(원)", min_value=0, value=int(base_amount), step=1000)
-                )
-                discount_amount = max(0, base_amount - final_amount)
-                discount_value = discount_amount
-
-            st.caption(
-                f"원가 **{base_amount:,}원** · 할인 **{discount_amount:,}원** · 최종 **{final_amount:,}원**"
-            )
-
-            st.session_state["student_reg_course_prev"] = course
-            st.session_state["student_reg_total_prev"] = int(total_sessions)
+        if student_section == "📝 신규 등록":
+            st.write("새로운 수강생 정보를 입력해주세요.")
             
-            reg_date = st.date_input("등록일", value=datetime.now())
-            memo = st.text_area("특이사항 및 메모")
-            
-            submit_btn = st.form_submit_button("✅ 수강생 등록하기", use_container_width=True)
-            
-            if submit_btn:
-                if name and contact:
-                    save_student_to_sheet(
-                        name,
-                        contact,
-                        reg_date,
-                        course,
-                        total_sessions,
-                        memo,
-                        final_amount=final_amount,
-                        base_amount=base_amount,
-                        discount_type=discount_type,
-                        discount_value=discount_value,
-                        discount_amount=discount_amount,
-                        event_name=event_name,
+            # 입력 폼
+            with st.form("student_reg_form", clear_on_submit=True):
+                # 코스가 시트에서 추가/수정되면 즉시 반영
+                course_options = get_course_options(force_refresh=False)
+                if "student_reg_course_prev" not in st.session_state:
+                    st.session_state["student_reg_course_prev"] = ""
+                if "student_reg_total_prev" not in st.session_state:
+                    st.session_state["student_reg_total_prev"] = 10
+    
+                name = st.text_input("이름", placeholder="이름을 입력하세요")
+                contact = st.text_input("연락처", placeholder="010-0000-0000")
+                course = st.selectbox("수강 코스", course_options, key="student_reg_course")
+                suggested_sessions = _suggest_sessions(course)
+    
+                prev_course = st.session_state.get("student_reg_course_prev", "")
+                prev_total = int(st.session_state.get("student_reg_total_prev", 10))
+                default_total = prev_total
+                if (not prev_course) or (course != prev_course and prev_total == _suggest_sessions(prev_course)):
+                    default_total = suggested_sessions
+    
+                total_sessions = st.number_input(
+                    "결제 횟수 (횟수제)",
+                    min_value=1,
+                    value=int(default_total),
+                    key="student_reg_total_input",
+                )
+                st.caption(f"추천 횟수: {suggested_sessions}회 (코스 기준, 직접 수정 가능)")
+    
+                base_amount = int(_resolve_course_price(course))
+                discount_type = st.selectbox("할인 유형", ["없음", "정액 할인", "정률 할인(%)", "이벤트가 직접입력"])
+                event_name = ""
+                discount_value = 0
+                discount_amount = 0
+                final_amount = base_amount
+    
+                if discount_type == "정액 할인":
+                    discount_value = int(
+                        st.number_input("할인 금액(원)", min_value=0, value=0, step=1000)
                     )
-                else:
-                    st.error("이름과 연락처는 필수 입력 사항입니다.")
-
-    with student_tab2:
-        display_student_list(show_mode="list")
-
-    with student_tab3:
-        display_student_list(show_mode="edit")
+                    discount_amount = min(discount_value, base_amount)
+                    final_amount = max(0, base_amount - discount_amount)
+                elif discount_type == "정률 할인(%)":
+                    discount_value = int(
+                        st.number_input("할인율(%)", min_value=0, max_value=100, value=0, step=5)
+                    )
+                    discount_amount = int(round(base_amount * (discount_value / 100.0)))
+                    final_amount = max(0, base_amount - discount_amount)
+                elif discount_type == "이벤트가 직접입력":
+                    event_name = st.text_input("이벤트명", placeholder="예: 봄맞이 원데이 20%")
+                    final_amount = int(
+                        st.number_input("최종 결제금액(원)", min_value=0, value=int(base_amount), step=1000)
+                    )
+                    discount_amount = max(0, base_amount - final_amount)
+                    discount_value = discount_amount
+    
+                st.caption(
+                    f"원가 **{base_amount:,}원** · 할인 **{discount_amount:,}원** · 최종 **{final_amount:,}원**"
+                )
+    
+                st.session_state["student_reg_course_prev"] = course
+                st.session_state["student_reg_total_prev"] = int(total_sessions)
+                
+                reg_date = st.date_input("등록일", value=datetime.now())
+                memo = st.text_area("특이사항 및 메모")
+                
+                submit_btn = st.form_submit_button("✅ 수강생 등록하기", use_container_width=True)
+                
+                if submit_btn:
+                    if name and contact:
+                        save_student_to_sheet(
+                            name,
+                            contact,
+                            reg_date,
+                            course,
+                            total_sessions,
+                            memo,
+                            final_amount=final_amount,
+                            base_amount=base_amount,
+                            discount_type=discount_type,
+                            discount_value=discount_value,
+                            discount_amount=discount_amount,
+                            event_name=event_name,
+                        )
+                    else:
+                        st.error("이름과 연락처는 필수 입력 사항입니다.")
+    
+        elif student_section == "📋 원생 명부":
+            display_student_list(show_mode="list")
+    
+        else:
+            display_student_list(show_mode="edit")
 
     with st.expander("🗓 일정 관리 및 등록", expanded=False):
         run_schedule_ui(simple_mode=True)
@@ -290,6 +296,8 @@ def save_student_to_sheet(
             pay_note += f" / 이벤트:{event_name}"
         if is_rereg:
             pay_note += " / 재등록(ID유지)"
+
+        from core.finance import record_registration_payment
 
         record_registration_payment(
             student_id=target_id,
@@ -438,6 +446,8 @@ def update_student_profile(
 
 def display_student_list(show_mode="list"):
     """ID 기반 카드 UI + 출석 차감 버튼 통합 버전"""
+    from core.curriculum import get_course_options
+
     try:
         conn = get_conn()
         # 목록은 캐시 사용(읽기 요청 절감), 수정/저장 시 rerun으로 즉시 반영

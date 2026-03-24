@@ -897,7 +897,9 @@ def render_owner_menu_grid(owner_login_at, active_idx=None):
 
           try {
             const observer = new MutationObserver(() => applyMenuButtonClasses());
-            observer.observe(doc.body, { childList: true, subtree: true });
+            const root =
+              doc.querySelector('section[data-testid="stAppViewContainer"]') || doc.body;
+            observer.observe(root, { childList: true, subtree: true });
             setTimeout(() => observer.disconnect(), 12000);
           } catch (e) {}
         })();

@@ -221,20 +221,21 @@ def run_curriculum_ui():
     st.header("📚 커리큘럼")
     conn, df = _load_curriculum()
 
-    tab1, tab2, tab3, tab4 = st.tabs(
-        ["🎯 코스 관리", "➕ 등록", "🗑 삭제", "✏️ 일괄 수정"]
+    section = st.segmented_control(
+        "커리큘럼 메뉴",
+        ["🎯 코스 관리", "➕ 등록", "🗑 삭제", "✏️ 일괄 수정"],
+        default="🎯 코스 관리",
+        key="curriculum_main_section",
+        label_visibility="collapsed",
     )
 
-    with tab1:
+    if section == "🎯 코스 관리":
         _render_course_manage(conn, df)
-
-    with tab2:
+    elif section == "➕ 등록":
         _render_curriculum_create(conn, df)
-
-    with tab3:
+    elif section == "🗑 삭제":
         _render_curriculum_delete(conn, df)
-
-    with tab4:
+    else:
         _render_curriculum_bulk_edit(conn, df)
 
 

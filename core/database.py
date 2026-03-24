@@ -44,24 +44,36 @@ def get_prompt_worksheet():
     return "prompt"
 
 
-def _read_prompt_sheet(conn, sheet_url):
+def _read_prompt_sheet(conn, sheet_url, *, ttl=60, discover_fallbacks=True):
     """프롬프트 구조(category/prompt)를 가진 워크시트를 찾아 읽습니다."""
     configured_ws = get_prompt_worksheet()
-    candidate_worksheets = [configured_ws, "prompts", "Tab", "sheet1", "Sheet1"]
     last_error = None
 
+    try:
+        df = conn.read(spreadsheet=sheet_url, worksheet=configured_ws, ttl=ttl)
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            if "category" in df.columns and "prompt" in df.columns:
+                return df, configured_ws
+    except Exception as e:
+        last_error = e
+
+    if not discover_fallbacks:
+        if last_error:
+            raise last_error
+        return pd.DataFrame(), None
+
+    candidate_worksheets = [w for w in ("prompts", "Tab", "sheet1", "Sheet1") if w != configured_ws]
     for ws in candidate_worksheets:
         try:
-            df = conn.read(spreadsheet=sheet_url, worksheet=ws, ttl=0)
+            df = conn.read(spreadsheet=sheet_url, worksheet=ws, ttl=ttl)
             if isinstance(df, pd.DataFrame) and not df.empty:
                 if "category" in df.columns and "prompt" in df.columns:
                     return df, ws
         except Exception as e:
             last_error = e
 
-    # 마지막 fallback: worksheet 미지정 읽기
     try:
-        df = conn.read(spreadsheet=sheet_url, ttl=0)
+        df = conn.read(spreadsheet=sheet_url, ttl=ttl)
         if isinstance(df, pd.DataFrame) and "category" in df.columns and "prompt" in df.columns:
             return df, None
     except Exception as e:
@@ -95,7 +107,7 @@ def save_prompt_to_sheet(category, new_prompt):
             st.error("시트 URL 설정을 찾을 수 없습니다.")
             return
         
-        df, worksheet = _read_prompt_sheet(conn, sheet_url)
+        df, worksheet = _read_prompt_sheet(conn, sheet_url, ttl=0, discover_fallbacks=True)
         if df.empty:
             st.error("프롬프트 시트를 찾지 못했습니다. 시트 탭과 컬럼(category, prompt)을 확인해주세요.")
             return
@@ -104,7 +116,6 @@ def save_prompt_to_sheet(category, new_prompt):
             conn.update(spreadsheet=sheet_url, worksheet=worksheet, data=df)
         else:
             conn.update(spreadsheet=sheet_url, data=df)
-        st.cache_data.clear()
     except Exception as e:
         st.error(f"프롬프트 저장 에러: {repr(e)}")
     
@@ -149,7 +160,7 @@ def get_history_data():
         if not sheet_url:
             return pd.DataFrame()
         
-        df = conn.read(spreadsheet=sheet_url, worksheet="history", ttl=0)
+        df = conn.read(spreadsheet=sheet_url, worksheet="history", ttl=60)
         return df.sort_values(by="date", ascending=False)
     except Exception:
         return pd.DataFrame()
