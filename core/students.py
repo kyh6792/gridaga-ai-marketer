@@ -3,9 +3,27 @@ import pandas as pd
 from datetime import datetime
 import time
 from core.database import get_conn
-from core.curriculum import get_course_options
+from core.curriculum import get_course_options, get_course_price_map
 from core.schedule import run_schedule_ui
 from core.finance import record_registration_payment
+
+# 운영 대시보드(승인/최근처리): 메뉴 전환마다 시트 재조회 방지 — 쓰기·승인 시에만 무효화
+_OWNER_DASH_CACHE_TTL_SEC = 30
+_REQ_RAW_CACHE_KEY = "_owner_dash_attendance_requests_raw"
+_REQ_RAW_CACHE_TS = "_owner_dash_attendance_requests_ts"
+_LOG_DASH_CACHE_KEY = "_owner_dash_attendance_log_recent"
+_LOG_DASH_CACHE_TS = "_owner_dash_attendance_log_ts"
+
+
+def invalidate_owner_dashboard_sheet_caches():
+    """승인/요청접수/로그재시도 등 시트가 바뀐 뒤 대시보드가 바로 반영되게 캐시 제거."""
+    for k in (
+        _REQ_RAW_CACHE_KEY,
+        _REQ_RAW_CACHE_TS,
+        _LOG_DASH_CACHE_KEY,
+        _LOG_DASH_CACHE_TS,
+    ):
+        st.session_state.pop(k, None)
 
 
 def _safe_read(conn, worksheet, ttl=0, retries=2):
@@ -50,6 +68,15 @@ def run_student_ui():
         if "코스 B".upper() in course_text:
             return 8
         return 10
+
+    def _resolve_course_price(course_name):
+        price_map = get_course_price_map()
+        if course_name in price_map:
+            return int(price_map[course_name] or 0)
+        for k, v in price_map.items():
+            if str(k) in str(course_name) or str(course_name) in str(k):
+                return int(v or 0)
+        return 0
     
     # 상단 탭 구성 (등록하기 / 명단보기 / 시간표)
     tab1, tab2, tab3 = st.tabs(["📝 신규 등록", "📋 원생 명부", "🗓 시간표"])
@@ -84,6 +111,37 @@ def run_student_ui():
             )
             st.caption(f"추천 횟수: {suggested_sessions}회 (코스 기준, 직접 수정 가능)")
 
+            base_amount = int(_resolve_course_price(course))
+            discount_type = st.selectbox("할인 유형", ["없음", "정액 할인", "정률 할인(%)", "이벤트가 직접입력"])
+            event_name = ""
+            discount_value = 0
+            discount_amount = 0
+            final_amount = base_amount
+
+            if discount_type == "정액 할인":
+                discount_value = int(
+                    st.number_input("할인 금액(원)", min_value=0, value=0, step=1000)
+                )
+                discount_amount = min(discount_value, base_amount)
+                final_amount = max(0, base_amount - discount_amount)
+            elif discount_type == "정률 할인(%)":
+                discount_value = int(
+                    st.number_input("할인율(%)", min_value=0, max_value=100, value=0, step=5)
+                )
+                discount_amount = int(round(base_amount * (discount_value / 100.0)))
+                final_amount = max(0, base_amount - discount_amount)
+            elif discount_type == "이벤트가 직접입력":
+                event_name = st.text_input("이벤트명", placeholder="예: 봄맞이 원데이 20%")
+                final_amount = int(
+                    st.number_input("최종 결제금액(원)", min_value=0, value=int(base_amount), step=1000)
+                )
+                discount_amount = max(0, base_amount - final_amount)
+                discount_value = discount_amount
+
+            st.caption(
+                f"원가 **{base_amount:,}원** · 할인 **{discount_amount:,}원** · 최종 **{final_amount:,}원**"
+            )
+
             st.session_state["student_reg_course_prev"] = course
             st.session_state["student_reg_total_prev"] = int(total_sessions)
             
@@ -94,7 +152,20 @@ def run_student_ui():
             
             if submit_btn:
                 if name and contact:
-                    save_student_to_sheet(name, contact, reg_date, course, total_sessions, memo)
+                    save_student_to_sheet(
+                        name,
+                        contact,
+                        reg_date,
+                        course,
+                        total_sessions,
+                        memo,
+                        final_amount=final_amount,
+                        base_amount=base_amount,
+                        discount_type=discount_type,
+                        discount_value=discount_value,
+                        discount_amount=discount_amount,
+                        event_name=event_name,
+                    )
                 else:
                     st.error("이름과 연락처는 필수 입력 사항입니다.")
 
@@ -119,7 +190,21 @@ def generate_student_id(df):
     # 가장 큰 번호를 찾아 +1
     last_id = int(max(same_year_ids))
     return str(last_id + 1)
-def save_student_to_sheet(name, contact, reg_date, course, total_sessions, memo):
+def save_student_to_sheet(
+    name,
+    contact,
+    reg_date,
+    course,
+    total_sessions,
+    memo,
+    *,
+    final_amount=None,
+    base_amount=None,
+    discount_type="없음",
+    discount_value=0,
+    discount_amount=0,
+    event_name="",
+):
     try:
         conn = get_conn()
         df = _safe_read(conn, worksheet="students", ttl=0)
@@ -162,13 +247,23 @@ def save_student_to_sheet(name, contact, reg_date, course, total_sessions, memo)
         st.success(f"🎊 [ID: {new_id}] {name}님 등록 완료!")
 
         # 재무 거래 자동 누적
+        pay_note = f"{course} / {val_int}회"
+        if discount_type and str(discount_type) != "없음":
+            pay_note += f" / 할인:{discount_type}"
+        if event_name:
+            pay_note += f" / 이벤트:{event_name}"
         record_registration_payment(
             student_id=new_id,
             student_name=name,
             course=course,
             event_type="재등록" if is_rereg else "등록",
-            amount=None,
-            note=f"{course} / {val_int}회",
+            amount=final_amount,
+            note=pay_note,
+            base_amount=base_amount,
+            discount_type=discount_type,
+            discount_value=discount_value,
+            discount_amount=discount_amount,
+            event_name=event_name,
         )
         
     except Exception as e:
@@ -366,18 +461,33 @@ def deduct_session(student_id, request_meta=None):
         return False, f"오류 발생: {e}"
 
 
-def _read_or_init_attendance_requests(conn):
+def _read_or_init_attendance_requests(conn, read_ttl=0):
     base_columns = ["request_id", "time", "student_id", "student_name", "status", "approved_time"]
     try:
-        req_df = _safe_read(conn, worksheet="attendance_requests", ttl=15)
+        req_df = _safe_read(conn, worksheet="attendance_requests", ttl=read_ttl)
     except Exception:
         req_df = pd.DataFrame(columns=base_columns)
         _safe_update(conn, worksheet="attendance_requests", data=req_df)
-        req_df = _safe_read(conn, worksheet="attendance_requests", ttl=15)
+        req_df = _safe_read(conn, worksheet="attendance_requests", ttl=read_ttl)
 
     if req_df is None or req_df.empty:
         req_df = pd.DataFrame(columns=base_columns)
     return req_df
+
+
+def _get_attendance_requests_raw_cached(conn, *, force_refresh: bool = False):
+    """운영 대시보드용: 짧은 세션 캐시로 attendance_requests 1회만 네트워크."""
+    now = time.time()
+    if not force_refresh:
+        ts = st.session_state.get(_REQ_RAW_CACHE_TS)
+        if ts is not None and (now - ts) < _OWNER_DASH_CACHE_TTL_SEC:
+            cached = st.session_state.get(_REQ_RAW_CACHE_KEY)
+            if cached is not None:
+                return cached.copy()
+    req_df = _read_or_init_attendance_requests(conn, read_ttl=0)
+    st.session_state[_REQ_RAW_CACHE_KEY] = req_df.copy()
+    st.session_state[_REQ_RAW_CACHE_TS] = now
+    return req_df.copy()
 
 
 def create_attendance_request(student_id):
@@ -436,16 +546,17 @@ def create_attendance_request(student_id):
         }])
         updated = pd.concat([req_df, new_request], ignore_index=True)
         _safe_update(conn, worksheet="attendance_requests", data=updated)
+        invalidate_owner_dashboard_sheet_caches()
         return True, f"{new_request.iloc[0]['student_name']}님 출석 요청이 접수되었습니다."
     except Exception as e:
         return False, f"출석 요청 생성 실패: {e}"
 
 
-def get_pending_attendance_requests(limit=20):
-    """승인 대기 중인 출석 요청 목록을 최신순으로 반환합니다."""
+def get_pending_attendance_requests(limit=20, force_refresh: bool = False):
+    """승인 대기 중인 출석 요청 목록을 최신순으로 반환합니다. (대시보드는 세션 캐시)"""
     try:
         conn = get_conn()
-        req_df = _read_or_init_attendance_requests(conn)
+        req_df = _get_attendance_requests_raw_cached(conn, force_refresh=force_refresh)
         if req_df.empty:
             return req_df
 
@@ -499,6 +610,7 @@ def approve_attendance_request(request_id):
             req_df.at[row_idx, "status"] = "approved"
         req_df.at[row_idx, "approved_time"] = approved_time
         _safe_update(conn, worksheet="attendance_requests", data=req_df)
+        invalidate_owner_dashboard_sheet_caches()
         student_name = str(req_df.at[row_idx, "student_name"])
         if str(req_df.at[row_idx, "status"]) == "approved_log_failed":
             return True, f"{student_name}님 차감은 완료되었지만 로그 저장은 실패했습니다. (재시도 필요)"
@@ -554,6 +666,7 @@ def save_attendance_log(student_id, student_name, remain_count, request_meta=Non
         }])
         updated_df = pd.concat([log_df, new_row], ignore_index=True)
         _safe_update(conn, worksheet="attendance_log", data=updated_df)
+        invalidate_owner_dashboard_sheet_caches()
         return True
     except Exception as e:
         # 알림 로그 실패는 차감을 막지 않되, 화면에서 확인 가능하도록 저장
@@ -561,11 +674,11 @@ def save_attendance_log(student_id, student_name, remain_count, request_meta=Non
         return False
 
 
-def get_failed_log_requests(limit=20):
+def get_failed_log_requests(limit=20, force_refresh: bool = False):
     """차감은 되었지만 로그 저장 실패한 요청 목록"""
     try:
         conn = get_conn()
-        req_df = _read_or_init_attendance_requests(conn)
+        req_df = _get_attendance_requests_raw_cached(conn, force_refresh=force_refresh)
         if req_df.empty:
             return req_df
         req_df = req_df[req_df["status"].astype(str) == "approved_log_failed"]
@@ -611,32 +724,47 @@ def retry_failed_log_request(request_id):
 
         req_df.at[row_idx, "status"] = "approved"
         _safe_update(conn, worksheet="attendance_requests", data=req_df)
+        invalidate_owner_dashboard_sheet_caches()
         return True, "로그 저장 재시도 성공"
     except Exception as e:
         return False, f"로그 재시도 실패: {e}"
 
 
-def get_recent_attendance_logs(limit=10):
-    """최근 출석 로그를 최신순으로 반환합니다."""
+def get_recent_attendance_logs(limit=10, force_refresh: bool = False):
+    """최근 출석 로그를 최신순으로 반환합니다. (대시보드는 세션 캐시)"""
     try:
         conn = get_conn()
+        now = time.time()
+        if not force_refresh:
+            ts = st.session_state.get(_LOG_DASH_CACHE_TS)
+            if ts is not None and (now - ts) < _OWNER_DASH_CACHE_TTL_SEC:
+                cached = st.session_state.get(_LOG_DASH_CACHE_KEY)
+                if cached is not None:
+                    return cached.head(limit).copy()
+
         try:
-            df = _safe_read(conn, worksheet="attendance_log", ttl=20)
+            df = _safe_read(conn, worksheet="attendance_log", ttl=0)
         except Exception:
             # 탭이 없으면 빈 탭 자동 생성 시도
             empty_df = pd.DataFrame(
                 columns=["time", "student_id", "student_name", "remain_count", "event", "request_id", "request_time", "approved_time"]
             )
             _safe_update(conn, worksheet="attendance_log", data=empty_df)
-            df = _safe_read(conn, worksheet="attendance_log", ttl=20)
+            df = _safe_read(conn, worksheet="attendance_log", ttl=0)
 
         if df is None or df.empty:
-            return pd.DataFrame(
+            out = pd.DataFrame(
                 columns=["time", "student_id", "student_name", "remain_count", "event", "request_id", "request_time", "approved_time"]
             )
+            st.session_state[_LOG_DASH_CACHE_KEY] = out
+            st.session_state[_LOG_DASH_CACHE_TS] = now
+            return out
         if "time" in df.columns:
             df = df.sort_values(by="time", ascending=False)
-        return df.head(limit).copy()
+        out = df.copy()
+        st.session_state[_LOG_DASH_CACHE_KEY] = out
+        st.session_state[_LOG_DASH_CACHE_TS] = now
+        return out.head(limit).copy()
     except Exception as e:
         st.session_state["attendance_log_error"] = f"attendance_log 조회 실패: {repr(e)}"
         return pd.DataFrame(

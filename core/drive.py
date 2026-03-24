@@ -1,22 +1,122 @@
+import io
+import os
+import re
+from datetime import datetime
+
 import streamlit as st
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
-import io
-import os
-import re # 정규표현식 import 확인
-from PIL import Image
-from datetime import datetime
-from googleapiclient.discovery import build
-from google.oauth2 import service_account
+from googleapiclient.errors import HttpError
+from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload, MediaIoBaseUpload
+from PIL import Image, ImageOps
+
+# 시트 연결용 [connections.google_drive]에 들어 있는 앱 전용 키 (서비스 계정 JSON 아님)
+_DRIVE_SECRETS_APP_KEYS = frozenset({"folder_id", "spreadsheet", "backup_folder_id"})
+
+# Drive API 호출에 명시적 스코프 (미지정 시 insufficientPermissions 403이 나는 경우가 있음)
+_DRIVE_SCOPES = ("https://www.googleapis.com/auth/drive",)
+
+
+def _raw_drive_secrets():
+    """Streamlit 표준 [connections.google_drive] 또는 레거시 최상위 [google_drive]."""
+    try:
+        if "connections" in st.secrets and "google_drive" in st.secrets["connections"]:
+            return dict(st.secrets["connections"]["google_drive"])
+    except Exception:
+        pass
+    try:
+        if "google_drive" in st.secrets:
+            return dict(st.secrets["google_drive"])
+    except Exception:
+        pass
+    return None
+
+
+def _service_account_info_dict():
+    """Google Credentials.from_service_account_info()용 dict (folder_id 등 제외)."""
+    raw = _raw_drive_secrets()
+    if not raw:
+        return None
+    return {k: v for k, v in raw.items() if k not in _DRIVE_SECRETS_APP_KEYS}
+
+
+def get_drive_folder_id():
+    """마케팅 업로드·갤러리용 드라이브 폴더 ID (secrets의 connections.google_drive.folder_id)."""
+    raw = _raw_drive_secrets()
+    if not raw:
+        return None
+    fid = raw.get("folder_id")
+    return str(fid).strip() if fid else None
+
+
+def get_backup_folder_id():
+    """일일 시트 백업 업로드 폴더. `backup_folder_id` 없으면 `folder_id`와 동일."""
+    raw = _raw_drive_secrets()
+    if not raw:
+        return None
+    fid = raw.get("backup_folder_id") or raw.get("folder_id")
+    return str(fid).strip() if fid else None
+
+
+def get_service_account_credentials(scopes: tuple[str, ...] | None = None):
+    """서비스 계정 Credentials. scopes 미지정 시 Drive 전용."""
+    creds_info = _service_account_info_dict()
+    if not creds_info:
+        return None
+    s = list(scopes) if scopes is not None else list(_DRIVE_SCOPES)
+    return service_account.Credentials.from_service_account_info(creds_info, scopes=s)
+
 
 # [핵심] 구글 서비스 연결 객체를 만드는 함수
 def get_drive_service():
     """인증 정보를 사용하여 구글 드라이브 서비스 객체 생성"""
-    creds_info = st.secrets["google_drive"] # secrets.toml의 정보 사용
-    creds = service_account.Credentials.from_service_account_info(creds_info)
-    # 구글 드라이브 API 버전 3 사용
-    return build('drive', 'v3', credentials=creds)
+    creds = get_service_account_credentials()
+    if not creds:
+        raise KeyError(
+            'google_drive: secrets에 [connections.google_drive] 블록(또는 google_drive)을 설정해주세요.'
+        )
+    return build("drive", "v3", credentials=creds)
+
+
+def upload_bytes_to_drive(
+    data: bytes,
+    file_name: str,
+    folder_id: str,
+    mime_type: str = "application/octet-stream",
+    *,
+    add_anyone_reader: bool = False,
+    user_credentials=None,
+) -> dict | None:
+    """바이너리를 드라이브 폴더에 업로드. 실패 시 None.
+
+    user_credentials: OAuth Credentials 시 본인 드라이브 업로드(개인 folder_id).
+    """
+    try:
+        if user_credentials is not None:
+            service = build("drive", "v3", credentials=user_credentials)
+        else:
+            service = get_drive_service()
+        media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mime_type, resumable=True)
+        body = {"name": file_name, "parents": [folder_id]}
+        file = service.files().create(
+            body=body,
+            media_body=media,
+            fields="id, webViewLink",
+            supportsAllDrives=True,
+            ignoreDefaultVisibility=True,
+        ).execute()
+        if add_anyone_reader:
+            try:
+                service.permissions().create(
+                    fileId=file.get("id"),
+                    body={"type": "anyone", "role": "reader"},
+                    supportsAllDrives=True,
+                ).execute()
+            except Exception:
+                pass
+        return {"id": file.get("id"), "link": file.get("webViewLink")}
+    except Exception:
+        return None
 
 def get_drive_image_list(folder_id):
     """파일 목록을 가져올 때 'service' 객체를 호출하여 사용"""
@@ -27,16 +127,27 @@ def get_drive_image_list(folder_id):
         results = service.files().list(
             q=f"'{folder_id}' in parents and trashed = false and mimeType contains 'image/'",
             fields="files(id, name, thumbnailLink, webViewLink, mimeType)",
-            pageSize=50
+            pageSize=50,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
         ).execute()
         return results.get('files', [])
     except Exception as e:
         st.error(f"드라이브 목록 로드 실패: {e}")
         return []
 
-def upload_image_to_drive(pil_image, folder_id, category):
-    """PIL 이미지를 구글 드라이브에 업로드하고 링크 반환 (WinError 32 방어)"""
-    service = get_drive_service()
+def upload_image_to_drive(pil_image, folder_id, category, user_credentials=None):
+    """PIL 이미지를 구글 드라이브에 업로드하고 링크 반환 (WinError 32 방어).
+
+    user_credentials: google.oauth2.credentials.Credentials (OAuth). None이면 서비스 계정.
+    """
+    if pil_image.mode in ("RGBA", "P", "LA"):
+        pil_image = pil_image.convert("RGB")
+
+    if user_credentials is not None:
+        service = build("drive", "v3", credentials=user_credentials)
+    else:
+        service = get_drive_service()
     
     # 1. 파일명 정제 (특수문자 제거)
     time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -70,21 +181,42 @@ def upload_image_to_drive(pil_image, folder_id, category):
             ignoreDefaultVisibility=True  # 기본 가시성 설정 무시 (소유권 이슈 방지)
         ).execute()
 
-        # 4. [추가 조치] 업로드 성공 후 권한 전파 (옵션)
-        # 만약 위 설정으로도 안 된다면, 아래 코드를 통해 '누구나' 볼 수 있게 잠시 엽니다.
-        service.permissions().create(
-         fileId=file.get('id'),
-         body={'type': 'anyone', 'role': 'reader'},
-         supportsAllDrives=True
-        ).execute()
-        
+        # 조직(Workspace) 정책으로 "링크가 있는 모든 사용자" 공개가 막히면 403 — 업로드 자체는 성공한 상태
+        try:
+            service.permissions().create(
+                fileId=file.get("id"),
+                body={"type": "anyone", "role": "reader"},
+                supportsAllDrives=True,
+            ).execute()
+        except Exception as perm_err:
+            st.warning(
+                "파일은 업로드되었으나 '누구나 보기' 공개는 조직 정책 등으로 설정되지 않았습니다. "
+                f"({perm_err})"
+            )
+
         return {
             'id': file.get('id'),
             'link': file.get('webViewLink')
         }
         
     except Exception as e:
-        st.error(f"드라이브 업로드 중 오류 발생: {e}")
+        err_txt = str(e)
+        is_sa_quota = user_credentials is None and (
+            "Service Accounts do not have storage quota" in err_txt
+            or "storageQuotaExceeded" in err_txt
+        )
+        if is_sa_quota and (not isinstance(e, HttpError) or e.resp.status == 403):
+            st.error(
+                "서비스 계정은 **개인 드라이브(내 드라이브) 용량**을 쓸 수 없습니다. "
+                "폴더를 공유해도 이 오류가 날 수 있습니다.\n\n"
+                "**가능한 해결:**\n"
+                "1. **Google Workspace 공유 드라이브**를 만들고, 그 안에 폴더를 두고 `folder_id`를 그 폴더로 지정한 뒤, "
+                "서비스 계정을 해당 **공유 드라이브 멤버**(콘텐츠 관리자 등)로 추가\n"
+                "2. 또는 **OAuth**(본인 구글 로그인)로 업로드하도록 앱을 바꾸기\n"
+                "3. Workspace라면 **도메인 전체 위임**으로 특정 사용자로 위장 업로드(관리자 설정 필요)"
+            )
+        else:
+            st.error(f"드라이브 업로드 중 오류 발생: {e}")
         return None
         
     finally:
@@ -129,13 +261,38 @@ def download_drive_image(file_id):
     except Exception as e:
         st.error(f"❌ 드라이브 사진 다운로드 중 에러: {e}")
         return None
-        
-        
-        
+
+
+@st.cache_data(show_spinner=False, ttl=600)
+def _get_drive_preview_image(file_id: str):
+    """갤러리용 미리보기 이미지를 안정적으로 로드(품질/비율 유지)."""
+    img = download_drive_image(file_id)
+    if img is None:
+        return None
+    try:
+        img = ImageOps.exif_transpose(img)
+    except Exception:
+        pass
+    if img.mode in ("RGBA", "P", "LA"):
+        img = img.convert("RGB")
+    # 목록 렌더링 부담을 줄이기 위해 긴 변 기준으로 축소
+    try:
+        img.thumbnail((960, 960))
+    except Exception:
+        pass
+    return img
+
+
 def display_drive_selector():
     """구글 드라이브 썸네일 갤러리 (개수 조절 기능 추가)"""
-    folder_id = st.secrets.get("google_drive", {}).get("folder_id")
-    
+    raw = _raw_drive_secrets()
+    folder_id = (raw or {}).get("folder_id")
+    if not folder_id:
+        st.error(
+            "드라이브 폴더 ID가 없습니다. secrets의 `[connections.google_drive]`에 `folder_id`를 넣어주세요."
+        )
+        return None, ""
+
     with st.spinner("☁️ 드라이브에서 작품 목록을 가져오고 있습니다..."):
         files = get_drive_image_list(folder_id)
 
@@ -165,12 +322,14 @@ def display_drive_selector():
         # 선택된 개수(num_cols)에 맞춰 순서대로 배치
         with cols[idx % num_cols]:
             with st.container(border=True):
-                if thumb_url:
-                    # 사진이 작아지므로 해상도는 s400 정도로 유지해도 충분합니다.
-                    high_res_thumb = thumb_url.replace("=s220", "=s400")
-                    st.image(high_res_thumb, use_container_width=True)
+                preview_img = _get_drive_preview_image(file_id) if file_id else None
+                if preview_img is not None:
+                    st.image(preview_img, width=170)
+                elif thumb_url:
+                    high_res_thumb = thumb_url.replace("=s220", "=s800")
+                    st.image(high_res_thumb, width=170)
                 else:
-                    st.image("https://via.placeholder.com/400x400?text=No+Img", use_container_width=True)
+                    st.image("https://via.placeholder.com/400x400?text=No+Img", width=170)
                 
                 short_name = file_name[:10] + "..." if len(file_name) > 10 else file_name
                 st.caption(short_name)

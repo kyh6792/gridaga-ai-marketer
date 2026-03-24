@@ -1,9 +1,10 @@
 streamlit
+streamlit-option-menu
 google-genai
 Pillow
 python-dotenv
 st-gsheets-connection
 pandas
-google-api-python-client 
+google-api-python-client
 google-auth
-pillow
+google-auth-oauthlib

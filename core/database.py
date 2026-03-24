@@ -3,8 +3,21 @@ from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 from datetime import datetime
 
+# 세션당 1회만 st.connection 생성 (메뉴 전환·리런마다 서비스 계정 클라이언트 재초기화 완화)
+_GSHEETS_SESSION_KEY = "_singleton_gsheets_connection"
+
+
 def get_conn():
-    return st.connection("google_drive", type=GSheetsConnection)
+    conn = st.session_state.get(_GSHEETS_SESSION_KEY)
+    if conn is None:
+        conn = st.connection("google_drive", type=GSheetsConnection)
+        st.session_state[_GSHEETS_SESSION_KEY] = conn
+    return conn
+
+
+def reset_gsheets_connection():
+    """시크릿 변경·연결 오류 후 수동으로 다시 붙일 때만 사용."""
+    st.session_state.pop(_GSHEETS_SESSION_KEY, None)
 
 
 def get_sheet_url():

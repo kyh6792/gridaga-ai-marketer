@@ -41,7 +41,23 @@ st.set_page_config(
     page_icon="🎨", 
     layout="centered" # 모바일은 wide보다 centered가 가독성이 좋습니다.
 )
-# app.py 상단
+_inject_chrome = getattr(_ui, "inject_global_streamlit_chrome_hide", None)
+if callable(_inject_chrome):
+    _inject_chrome()
+else:
+    _css = getattr(_ui, "STREAMLIT_CHROME_HIDE_CSS", None)
+    if _css:
+        st.markdown(f"<style>{_css}</style>", unsafe_allow_html=True)
+    else:
+        st.markdown(
+            '<style>[data-testid="stStatusWidget"]{display:none!important;}</style>',
+            unsafe_allow_html=True,
+        )
+
+# Google Drive OAuth 콜백 (?code= / ?state=) — 인트로보다 먼저 처리
+from core import drive_oauth
+
+drive_oauth.try_finish_google_drive_oauth()
 
 # --- 2. 인트로 화면 실행 ---
 # 새로고침 시 세션이 바뀌어도 인트로 반복을 막기 위해 query param 사용
@@ -140,8 +156,38 @@ def sync_owner_session_from_query():
 
 
 def render_intro_branch():
-    st.markdown("## 작업실 그리다가")
-    st.write("사용자 유형을 선택해주세요.")
+    st.markdown(
+        """
+        <style>
+        .home-welcome-card {
+            border: 1px solid #B78F6A;
+            border-radius: 16px;
+            padding: 0.95rem 1rem;
+            margin: 0.2rem 0 0.75rem 0;
+            background: linear-gradient(180deg, #E8D4BE 0%, #DDBE9D 100%);
+            box-shadow: 0 3px 10px rgba(96, 72, 48, 0.12);
+        }
+        .home-welcome-title {
+            margin: 0;
+            color: #4A3526;
+            font-size: 1.2rem;
+            font-weight: 800;
+            line-height: 1.25;
+        }
+        .home-welcome-sub {
+            margin: 0.35rem 0 0 0;
+            color: #5F4736;
+            font-size: 0.93rem;
+            line-height: 1.4;
+        }
+        </style>
+        <div class="home-welcome-card">
+            <p class="home-welcome-title">작업실 그리다가</p>
+            <p class="home-welcome-sub">오늘도 반가워요. 아래에서 사용자 유형을 선택해 주세요.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     if st.button("🎓 원생용", use_container_width=True, key="entry_student"):
         st.session_state["entry_mode"] = "student"
         st.query_params["mode"] = "student"
@@ -261,10 +307,12 @@ def render_student_entry():
     st.markdown("---")
     if st.button("⬅️ 처음으로", use_container_width=True, key="back_from_student"):
         st.session_state["entry_mode"] = None
+        st.session_state["intro_done"] = False
         st.session_state["student_id_input"] = ""
         st.session_state["student_message"] = ""
         st.session_state["student_message_type"] = ""
         st.query_params.pop("mode", None)
+        st.query_params.pop("skip_intro", None)
         st.rerun()
 
 
@@ -289,10 +337,12 @@ def render_owner_auth():
     st.markdown("---")
     if st.button("⬅️ 처음으로", use_container_width=True, key="back_from_owner"):
         st.session_state["entry_mode"] = None
+        st.session_state["intro_done"] = False
         st.session_state["owner_authenticated"] = False
         st.session_state["owner_login_at"] = ""
         st.query_params.pop("mode", None)
         st.query_params.pop("owner_login_at", None)
+        st.query_params.pop("skip_intro", None)
         st.rerun()
 
 
@@ -409,6 +459,11 @@ def render_owner_menu():
             )
         st.session_state["owner_prev_pending_count"] = pending_count
 
+    # 모바일에서 2열 → 세로 스택(CSS :has + 아래 JS). 앵커 바로 다음 형제가 메인 stHorizontalBlock 래퍼.
+    st.markdown(
+        '<span class="owner-main-split-anchor" aria-hidden="true"></span>',
+        unsafe_allow_html=True,
+    )
     left_col, right_col = st.columns([1, 1], gap="large")
 
     # 메뉴 버튼이 먼저 실행되어야 같은 실행에서 오른쪽 패널이 갱신됨 (이전엔 selected_idx가 먼저 잡혀 두 번 눌러야 했음)
@@ -493,6 +548,55 @@ def render_owner_menu():
                     if (delta > 60 && currentIdx > 0) updateIdx(currentIdx - 1);         // right swipe
                     startX = null;
                 }}, {{ passive: true }});
+
+                function findOwnerMainHorizontal(doc) {{
+                    const anchor = doc.querySelector("span.owner-main-split-anchor");
+                    if (!anchor) return null;
+                    const ec = anchor.closest('[data-testid="stElementContainer"]');
+                    if (!ec || !ec.nextElementSibling) return null;
+                    return ec.nextElementSibling.querySelector('[data-testid="stHorizontalBlock"]');
+                }}
+                function ownerMainSplitApply() {{
+                    let doc = document;
+                    let win = window;
+                    try {{
+                        if (window.parent && window.parent.document) {{
+                            const pdoc = window.parent.document;
+                            if (pdoc.querySelector("span.owner-main-split-anchor")) {{
+                                doc = pdoc;
+                                win = window.parent;
+                            }}
+                        }}
+                    }} catch (e) {{}}
+                    const hb = findOwnerMainHorizontal(doc);
+                    if (!hb) return;
+                    const narrow = win.innerWidth <= 900;
+                    hb.style.flexDirection = narrow ? "column" : "row";
+                    hb.style.alignItems = narrow ? "stretch" : "";
+                    const gap = narrow ? "0.75rem" : "";
+                    hb.style.gap = gap;
+                    const kids = hb.children;
+                    for (let i = 0; i < kids.length; i++) {{
+                        const c = kids[i];
+                        if (narrow) {{
+                            c.style.width = "100%";
+                            c.style.maxWidth = "100%";
+                            c.style.minWidth = "0";
+                            c.style.flex = "1 1 auto";
+                        }} else {{
+                            c.style.width = "";
+                            c.style.maxWidth = "";
+                            c.style.minWidth = "";
+                            c.style.flex = "";
+                        }}
+                    }}
+                }}
+                ownerMainSplitApply();
+                try {{
+                    (window.parent || window).addEventListener("resize", ownerMainSplitApply);
+                }} catch (e) {{
+                    window.addEventListener("resize", ownerMainSplitApply);
+                }}
             }})();
         </script>
         """,
@@ -503,15 +607,23 @@ def render_owner_menu():
     if st.button("로그아웃", use_container_width=True, key="owner_logout_bottom"):
         st.session_state["owner_authenticated"] = False
         st.session_state["entry_mode"] = None
+        st.session_state["intro_done"] = False
         st.session_state["owner_login_at"] = ""
         st.query_params.pop("mode", None)
         st.query_params.pop("owner_login_at", None)
         st.query_params.pop("owner_menu_idx", None)
+        st.query_params.pop("skip_intro", None)
         st.rerun()
     st.caption("Developed by 엔지니어 남편 v1.5")
 
 
 if st.session_state.get('intro_done'):
+    try:
+        from core.sheet_backup import maybe_run_daily_sheet_backup
+
+        maybe_run_daily_sheet_backup()
+    except Exception:
+        pass
     init_entry_state()
     sync_owner_session_from_query()
     # 원장 세션 1시간 만료 처리
@@ -538,4 +650,21 @@ if st.session_state.get('intro_done'):
 # --- 4. 푸터 ---
 if st.session_state.get('intro_done'):
     st.markdown("---")
-    st.caption("© 2026 작업실 그리다가. All rights reserved.")
+    fc1, fc2 = st.columns([3, 1], vertical_alignment="center")
+    with fc1:
+        st.caption("© 2026 작업실 그리다가. All rights reserved.")
+    with fc2:
+        _gd_connected = drive_oauth.has_valid_session_credentials()
+        if st.button(
+            "백업하기",
+            key="manual_sheet_backup",
+            help="스프레드시트 전체 → Drive에 .json.gz 저장. 마케팅에서 Google 드라이브 연결 후 사용.",
+            disabled=not _gd_connected,
+        ):
+            from core.sheet_backup import run_sheet_backup_now
+
+            ok, msg = run_sheet_backup_now()
+            if ok:
+                st.success(f"백업 완료: `{msg}`")
+            else:
+                st.error(f"백업 실패: {msg}")
