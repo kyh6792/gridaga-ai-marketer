@@ -842,6 +842,8 @@ def render_owner_menu_grid(owner_login_at, active_idx=None):
                 ):
                     st.session_state["owner_menu_index"] = idx
                     st.query_params["owner_menu_idx"] = str(idx)
+                    # 메뉴 전환 즉시 rerun해서 이전 패널 잔상/지연 최소화
+                    st.rerun()
 
     _menu_btn(row1[0], items[0][0], items[0][1])
     _menu_btn(row1[1], items[1][0], items[1][1])

@@ -8,7 +8,7 @@ from core.schedule import run_schedule_ui
 from core.finance import record_registration_payment
 
 # 운영 대시보드(승인/최근처리): 메뉴 전환마다 시트 재조회 방지 — 쓰기·승인 시에만 무효화
-_OWNER_DASH_CACHE_TTL_SEC = 30
+_OWNER_DASH_CACHE_TTL_SEC = 60
 _REQ_RAW_CACHE_KEY = "_owner_dash_attendance_requests_raw"
 _REQ_RAW_CACHE_TS = "_owner_dash_attendance_requests_ts"
 _LOG_DASH_CACHE_KEY = "_owner_dash_attendance_log_recent"
@@ -321,7 +321,7 @@ def _normalize_student_status(series_or_val):
     return v if v else "재원"
 
 
-def _get_latest_reg_event_map(ttl=20):
+def _get_latest_reg_event_map(ttl=60):
     """student_id -> 최근 등록유형(등록/재등록) 맵."""
     try:
         conn = get_conn()
@@ -441,7 +441,7 @@ def display_student_list(show_mode="list"):
     try:
         conn = get_conn()
         # 목록은 캐시 사용(읽기 요청 절감), 수정/저장 시 rerun으로 즉시 반영
-        df = _safe_read(conn, worksheet="students", ttl=15)
+        df = _safe_read(conn, worksheet="students", ttl=60)
         
         if df is not None and not df.empty:
             # 1. 데이터 타입 정돈 (ID 소수점 제거 및 숫자형 확정)
@@ -451,7 +451,7 @@ def display_student_list(show_mode="list"):
                 df["상태"] = "재원"
             df["상태"] = _normalize_student_status(df["상태"])
             
-            reg_event_map = _get_latest_reg_event_map(ttl=20)
+            reg_event_map = _get_latest_reg_event_map(ttl=60)
 
             # 2. 상단 필터 UI
             st.markdown("---")

@@ -599,6 +599,16 @@ def render_owner_menu():
         '<span class="owner-main-split-anchor" aria-hidden="true"></span>',
         unsafe_allow_html=True,
     )
+
+    # 메뉴 상태를 먼저 확정해서 본문 교체를 우선 처리
+    selected_idx = int(st.session_state.get("owner_menu_index", 0))
+    if selected_idx < 0 or selected_idx > 3:
+        selected_idx = 0
+    prev_idx = int(st.session_state.get("owner_prev_menu_index", selected_idx))
+    menu_changed = selected_idx != prev_idx
+    st.session_state["owner_prev_menu_index"] = selected_idx
+    st.query_params["owner_menu_idx"] = str(selected_idx)
+
     left_col, right_col = st.columns([1, 1], gap="large")
 
     # 메뉴 버튼이 먼저 실행되어야 같은 실행에서 오른쪽 패널이 갱신됨 (이전엔 selected_idx가 먼저 잡혀 두 번 눌러야 했음)
@@ -608,23 +618,16 @@ def render_owner_menu():
                 st.session_state.get("owner_login_at", ""),
                 active_idx=int(st.session_state.get("owner_menu_index", 0)),
             )
-            # 2분 자동 갱신(카드 영역)
-            if hasattr(st, "fragment"):
-                @st.fragment(run_every="120s")
-                def auto_refresh_owner_cards():
+            # 메뉴 전환 직후에는 카드 렌더를 1회 건너뛰어 오른쪽 패널 교체를 우선
+            if not menu_changed:
+                # 2분 자동 갱신(카드 영역)
+                if hasattr(st, "fragment"):
+                    @st.fragment(run_every="120s")
+                    def auto_refresh_owner_cards():
+                        render_dashboard_cards()
+                    auto_refresh_owner_cards()
+                else:
                     render_dashboard_cards()
-                auto_refresh_owner_cards()
-            else:
-                render_dashboard_cards()
-
-    selected_idx = int(st.session_state.get("owner_menu_index", 0))
-    if selected_idx < 0 or selected_idx > 3:
-        selected_idx = 0
-    st.query_params["owner_menu_idx"] = str(selected_idx)
-
-    prev_idx = int(st.session_state.get("owner_prev_menu_index", selected_idx))
-    menu_changed = selected_idx != prev_idx
-    st.session_state["owner_prev_menu_index"] = selected_idx
 
     with right_col:
         with st.container(border=True):
@@ -796,16 +799,54 @@ if st.session_state.get('intro_done'):
         st.caption("© 2026 작업실 그리다가. All rights reserved.")
     with fc2:
         _gd_connected = drive_oauth.has_valid_session_credentials()
-        if st.button(
-            "백업하기",
-            key="manual_sheet_backup",
-            help="스프레드시트 전체 → Drive에 .json.gz 저장. 마케팅에서 Google 드라이브 연결 후 사용.",
-            disabled=not _gd_connected,
-        ):
+        _backup_after_oauth = str(st.query_params.get("backup_after_oauth", "")) == "1"
+
+        # OAuth 완료 후 자동 백업 1회 실행
+        if _gd_connected and _backup_after_oauth and not st.session_state.get("_backup_after_oauth_done"):
             from core.sheet_backup import run_sheet_backup_now
 
             ok, msg = run_sheet_backup_now()
+            st.session_state["_backup_after_oauth_done"] = True
+            st.query_params.pop("backup_after_oauth", None)
             if ok:
                 st.success(f"백업 완료: `{msg}`")
             else:
                 st.error(f"백업 실패: {msg}")
+
+        if st.button(
+            "백업하기",
+            key="manual_sheet_backup",
+            help="스프레드시트 전체 → Drive에 .json.gz 저장. 연결 안 되어 있으면 로그인 후 자동 백업됩니다.",
+        ):
+            if _gd_connected:
+                from core.sheet_backup import run_sheet_backup_now
+
+                ok, msg = run_sheet_backup_now()
+                if ok:
+                    st.success(f"백업 완료: `{msg}`")
+                else:
+                    st.error(f"백업 실패: {msg}")
+            else:
+                if drive_oauth.oauth_google_drive_configured():
+                    cfg = getattr(drive_oauth, "_load_oauth_secrets", lambda: None)()
+                    make_url = getattr(drive_oauth, "build_google_drive_authorization_url", None)
+                    if cfg and callable(make_url):
+                        # 로그인 후 복귀 시 자동 백업 트리거용 마크
+                        st.query_params["backup_after_oauth"] = "1"
+                        auth_url = make_url(cfg)
+                        components.html(
+                            f"""
+                            <script>
+                              (function() {{
+                                try {{
+                                  const w = window.parent || window;
+                                  w.location.href = {auth_url!r};
+                                }} catch (e) {{}}
+                              }})();
+                            </script>
+                            """,
+                            height=0,
+                        )
+                        st.info("Google 로그인 페이지로 이동합니다...")
+                        st.stop()
+                st.error("Google Drive OAuth 설정이 없어 자동 로그인 백업을 사용할 수 없습니다.")

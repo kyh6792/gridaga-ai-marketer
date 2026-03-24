@@ -56,11 +56,11 @@ def _safe_update(conn, worksheet, data, retries=2):
 def _read_or_init_schedule():
     conn = get_conn()
     try:
-        df = _safe_read(conn, worksheet=WORKSHEET_NAME, ttl=20)
+        df = _safe_read(conn, worksheet=WORKSHEET_NAME, ttl=60)
     except Exception:
         df = pd.DataFrame(columns=BASE_COLUMNS)
         _safe_update(conn, worksheet=WORKSHEET_NAME, data=df)
-        df = _safe_read(conn, worksheet=WORKSHEET_NAME, ttl=20)
+        df = _safe_read(conn, worksheet=WORKSHEET_NAME, ttl=60)
 
     if df is None or df.empty:
         df = pd.DataFrame(columns=BASE_COLUMNS)
@@ -74,7 +74,7 @@ def _get_registered_students():
     """students 시트에서 등록된(재원) 원생 목록을 가져옵니다."""
     conn = get_conn()
     try:
-        sdf = _safe_read(conn, worksheet="students", ttl=20)
+        sdf = _safe_read(conn, worksheet="students", ttl=60)
     except Exception:
         return pd.DataFrame(columns=["ID", "이름", "상태"])
 
@@ -123,22 +123,34 @@ def run_schedule_ui(simple_mode=False):
     st.subheader("🗓 원생 시간표")
     conn, df = _read_or_init_schedule()
     if simple_mode:
-        tab1, tab2, tab3 = st.tabs(["📋 시간표 보기", "🗂 월별 타임테이블", "➕ 일정 등록"])
-        with tab1:
+        section = st.segmented_control(
+            "일정 메뉴",
+            ["📋 시간표 보기", "🗂 월별 타임테이블", "➕ 일정 등록"],
+            default="📋 시간표 보기",
+            key="schedule_simple_section",
+            label_visibility="collapsed",
+        )
+        if section == "📋 시간표 보기":
             _render_schedule_view(df)
-        with tab2:
+        elif section == "🗂 월별 타임테이블":
             _render_monthly_timetable(df)
-        with tab3:
+        else:
             _render_schedule_create(conn, df)
     else:
-        tab1, tab2, tab3, tab4 = st.tabs(["📋 시간표 보기", "🗂 월별 타임테이블", "➕ 일정 등록", "🗑 일정 삭제"])
-        with tab1:
+        section = st.segmented_control(
+            "일정 메뉴",
+            ["📋 시간표 보기", "🗂 월별 타임테이블", "➕ 일정 등록", "🗑 일정 삭제"],
+            default="📋 시간표 보기",
+            key="schedule_full_section",
+            label_visibility="collapsed",
+        )
+        if section == "📋 시간표 보기":
             _render_schedule_view(df)
-        with tab2:
+        elif section == "🗂 월별 타임테이블":
             _render_monthly_timetable(df)
-        with tab3:
+        elif section == "➕ 일정 등록":
             _render_schedule_create(conn, df)
-        with tab4:
+        else:
             _render_schedule_delete(conn, df)
 
 

@@ -42,9 +42,8 @@ def _read_or_init_transactions(ttl=0):
     try:
         df = conn.read(worksheet=WORKSHEET_NAME, ttl=ttl)
     except Exception:
+        # 읽기 실패 시 빈 시트로 덮어쓰지 않는다(데이터 유실 방지).
         df = pd.DataFrame(columns=BASE_COLUMNS)
-        conn.update(worksheet=WORKSHEET_NAME, data=df)
-        df = conn.read(worksheet=WORKSHEET_NAME, ttl=0)
 
     if df is None or df.empty:
         df = pd.DataFrame(columns=BASE_COLUMNS)
@@ -59,9 +58,8 @@ def _read_or_init_expenses(ttl=0):
     try:
         df = conn.read(worksheet=EXPENSE_WORKSHEET_NAME, ttl=ttl)
     except Exception:
+        # 읽기 실패 시 빈 시트로 덮어쓰지 않는다(데이터 유실 방지).
         df = pd.DataFrame(columns=EXPENSE_COLUMNS)
-        conn.update(worksheet=EXPENSE_WORKSHEET_NAME, data=df)
-        df = conn.read(worksheet=EXPENSE_WORKSHEET_NAME, ttl=0)
 
     if df is None or df.empty:
         df = pd.DataFrame(columns=EXPENSE_COLUMNS)
