@@ -146,9 +146,9 @@ def _safe_update(conn, worksheet, data, retries=2):
     raise last_error
 
 
-def _safe_read_curriculum(conn):
+def _safe_read_curriculum(conn, ttl=20):
     try:
-        df = _safe_read(conn, worksheet=WORKSHEET_NAME, ttl=20)
+        df = _safe_read(conn, worksheet=WORKSHEET_NAME, ttl=ttl)
     except Exception as e:
         msg = str(e)
         # 쿼터 초과 시에는 생성/업데이트 시도하지 않고 빈 데이터로 안전 fallback
@@ -157,7 +157,7 @@ def _safe_read_curriculum(conn):
             return pd.DataFrame(columns=_base_columns())
         df = pd.DataFrame(columns=_base_columns())
         _safe_update(conn, worksheet=WORKSHEET_NAME, data=df)
-        df = _safe_read(conn, worksheet=WORKSHEET_NAME, ttl=20)
+        df = _safe_read(conn, worksheet=WORKSHEET_NAME, ttl=ttl)
 
     if df is None or df.empty:
         return pd.DataFrame(columns=_base_columns())
@@ -206,9 +206,9 @@ def _ensure_default_courses(conn, df):
     return updated
 
 
-def _load_curriculum():
+def _load_curriculum(ttl=20):
     conn = get_conn()
-    df = _safe_read_curriculum(conn)
+    df = _safe_read_curriculum(conn, ttl=ttl)
     df = _seed_default_if_empty(conn, df)
     df = _ensure_default_courses(conn, df)
     if not df.empty:
@@ -423,9 +423,9 @@ def _render_curriculum_bulk_edit(conn, df):
         st.rerun()
 
 
-def get_course_options():
+def get_course_options(force_refresh=False):
     """원생 등록에서 사용할 코스 목록을 curriculum 시트에서 가져옵니다."""
-    _, df = _load_curriculum()
+    _, df = _load_curriculum(ttl=0 if force_refresh else 20)
     if df is None or df.empty:
         return ["정규반(주1회)", "정규반(주2회)", "원데이 클래스", "기타"]
 
@@ -441,9 +441,9 @@ def get_course_options():
     return options if options else ["기타"]
 
 
-def get_course_price_map():
+def get_course_price_map(force_refresh=False):
     """코스별 금액 맵 반환 (content에서 숫자 금액 파싱)"""
-    _, df = _load_curriculum()
+    _, df = _load_curriculum(ttl=0 if force_refresh else 20)
     if df is None or df.empty:
         return {}
     cdf = df[df["category"] == "코스"].copy()

@@ -1,6 +1,7 @@
 import streamlit as st
+import streamlit.components.v1 as components
 from google import genai
-from PIL import Image
+from PIL import Image, ImageOps
 import io
 import json
 import re
@@ -13,7 +14,7 @@ import pandas as pd
 from core.database import load_prompts_from_sheet, save_prompt_to_sheet, get_conn, get_history_data, save_to_history
 from core.config import DEFAULT_PROMPTS, API_MODEL
 from core import drive_oauth
-from core.drive import display_drive_selector, get_drive_folder_id, upload_image_to_drive
+from core.drive import display_drive_selector, get_drive_folder_id, upload_image_to_drive, upload_bytes_to_drive
 
 
 def _render_copy_text_box(label: str, text: str, key: str):
@@ -27,6 +28,26 @@ def _render_copy_text_box(label: str, text: str, key: str):
         height=24 * line_count + 20,
         help="내용 선택 후 복사해서 사용하세요.",
     )
+
+
+def _render_copy_button(text: str, key: str, label: str = "📋 복사하기"):
+    """클립보드 복사 버튼 (실패 시 안내)."""
+    if st.button(label, key=key, use_container_width=True):
+        payload = json.dumps(str(text or ""))
+        components.html(
+            f"""
+            <script>
+            (async () => {{
+              try {{
+                const txt = {payload};
+                await navigator.clipboard.writeText(txt);
+              }} catch (e) {{}}
+            }})();
+            </script>
+            """,
+            height=0,
+        )
+        st.toast("클립보드에 복사했어요.")
 
 
 def run_marketing_ui():
@@ -57,6 +78,7 @@ def run_marketing_ui():
         input_image = None
         final_image_link = ""
         auto_upload_after_generate = False
+        original_upload = None
 
         if not img_source:
             has_folder = bool(get_drive_folder_id())
@@ -73,7 +95,13 @@ def run_marketing_ui():
 
             uploaded_file = st.file_uploader("📷 사진을 선택하세요", type=['jpg', 'jpeg', 'png'])
             if uploaded_file:
-                input_image = Image.open(uploaded_file)
+                original_upload = {
+                    "bytes": uploaded_file.getvalue(),
+                    "name": str(getattr(uploaded_file, "name", "") or "").strip(),
+                    "mime_type": str(getattr(uploaded_file, "type", "") or "").strip() or "application/octet-stream",
+                }
+                # 휴대폰 사진 EXIF 방향값 반영 (회전/뒤집힘 방지)
+                input_image = ImageOps.exif_transpose(Image.open(uploaded_file))
                 st.image(input_image, use_container_width=True)
                 can_upload = has_folder and oauth_ok if oauth_on else has_folder
                 default_on = bool(can_upload and (oauth_ok if oauth_on else has_folder))
@@ -123,6 +151,7 @@ def run_marketing_ui():
                 final_image_link,
                 auto_upload_after_generate=auto_upload_after_generate,
                 output_mode=mode,
+                original_upload=original_upload,
             )
 
 # --- 내부 보조 함수 (가독성을 위해 분리) ---
@@ -135,6 +164,7 @@ def process_and_display_results(
     *,
     auto_upload_after_generate=False,
     output_mode: str = "both",
+    original_upload: dict | None = None,
 ):
     """output_mode: both | instagram | blog"""
     with st.status("🎨 AI가 작성 중...", expanded=False):
@@ -208,12 +238,26 @@ def process_and_display_results(
                 st.warning("드라이브 연결 안 됨 — 업로드 생략")
             else:
                 with st.spinner("☁️ 드라이브에 원본 사진 저장 중..."):
-                    up = upload_image_to_drive(
-                        image,
-                        folder_id,
-                        cat,
-                        user_credentials=user_creds if use_oauth else None,
-                    )
+                    if original_upload and original_upload.get("bytes"):
+                        original_name = str(original_upload.get("name", "")).strip()
+                        if not original_name:
+                            original_name = f"upload_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+                        up = upload_bytes_to_drive(
+                            data=original_upload.get("bytes", b""),
+                            file_name=original_name,
+                            folder_id=folder_id,
+                            mime_type=str(original_upload.get("mime_type", "") or "application/octet-stream"),
+                            add_anyone_reader=True,
+                            user_credentials=user_creds if use_oauth else None,
+                        )
+                    else:
+                        # 드라이브에서 고른 이미지 등 원본 bytes가 없을 때만 기존 JPG 변환 업로드 사용
+                        up = upload_image_to_drive(
+                            image,
+                            folder_id,
+                            cat,
+                            user_credentials=user_creds if use_oauth else None,
+                        )
                 if up and up.get("link"):
                     final_link = str(up["link"]).strip()
                     st.caption(f"드라이브에 저장됨: {final_link}")
@@ -228,17 +272,21 @@ def process_and_display_results(
         t1, t2 = st.tabs(["📸 인스타", "📝 블로그"])
         with t1:
             _render_copy_text_box("인스타 문구", insta_text, key=f"mk_out_insta_{render_key}")
+            _render_copy_button(insta_text, key=f"mk_out_copy_insta_{render_key}")
             st.link_button("인스타그램 바로가기", "https://instagram.com", use_container_width=True)
         with t2:
             _render_copy_text_box("블로그 문구", blog_text, key=f"mk_out_blog_{render_key}")
+            _render_copy_button(blog_text, key=f"mk_out_copy_blog_{render_key}")
             st.link_button("블로그 바로가기", "https://blog.naver.com", use_container_width=True)
     elif output_mode == "instagram":
         st.markdown("**📸 인스타**")
         _render_copy_text_box("인스타 문구", insta_text, key=f"mk_out_insta_{render_key}")
+        _render_copy_button(insta_text, key=f"mk_out_copy_insta_{render_key}")
         st.link_button("인스타그램 바로가기", "https://instagram.com", use_container_width=True)
     else:
         st.markdown("**📝 블로그**")
         _render_copy_text_box("블로그 문구", blog_text, key=f"mk_out_blog_{render_key}")
+        _render_copy_button(blog_text, key=f"mk_out_copy_blog_{render_key}")
         st.link_button("블로그 바로가기", "https://blog.naver.com", use_container_width=True)
 
     saved = save_to_history(cat, insta_text, blog_text, final_link)
@@ -380,11 +428,19 @@ def display_history_ui():
                         str(row.get("instagram", "")),
                         key=f"mk_hist_insta_{str(row.get('date', ''))}_{str(row.get('category', ''))}",
                     )
+                    _render_copy_button(
+                        str(row.get("instagram", "")),
+                        key=f"mk_hist_copy_insta_{str(row.get('date', ''))}_{str(row.get('category', ''))}",
+                    )
                     st.markdown("**블로그**")
                     _render_copy_text_box(
                         "블로그 문구",
                         str(row.get("blog", "")),
                         key=f"mk_hist_blog_{str(row.get('date', ''))}_{str(row.get('category', ''))}",
+                    )
+                    _render_copy_button(
+                        str(row.get("blog", "")),
+                        key=f"mk_hist_copy_blog_{str(row.get('date', ''))}_{str(row.get('category', ''))}",
                     )
             else:
                 st.caption(cap)
@@ -394,11 +450,19 @@ def display_history_ui():
                     str(row.get("instagram", "")),
                     key=f"mk_hist_nolink_insta_{str(row.get('date', ''))}_{str(row.get('category', ''))}",
                 )
+                _render_copy_button(
+                    str(row.get("instagram", "")),
+                    key=f"mk_hist_nolink_copy_insta_{str(row.get('date', ''))}_{str(row.get('category', ''))}",
+                )
                 st.markdown("**블로그**")
                 _render_copy_text_box(
                     "블로그 문구",
                     str(row.get("blog", "")),
                     key=f"mk_hist_nolink_blog_{str(row.get('date', ''))}_{str(row.get('category', ''))}",
+                )
+                _render_copy_button(
+                    str(row.get("blog", "")),
+                    key=f"mk_hist_nolink_copy_blog_{str(row.get('date', ''))}_{str(row.get('category', ''))}",
                 )
 
     if n_show < total:

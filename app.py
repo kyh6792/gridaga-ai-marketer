@@ -468,9 +468,10 @@ def render_owner_menu():
     render_owner_brand_header()
 
     def render_dashboard_cards():
-        pending_requests = get_pending_attendance_requests(limit=20)
-        failed_log_requests = get_failed_log_requests(limit=20)
-        recent_logs = get_recent_attendance_logs(limit=3)
+        # 승인/거절 직후 즉시 반영되도록 대시보드 캐시를 우회
+        pending_requests = get_pending_attendance_requests(limit=20, force_refresh=True)
+        failed_log_requests = get_failed_log_requests(limit=20, force_refresh=True)
+        recent_logs = get_recent_attendance_logs(limit=3, force_refresh=True)
         pending_count = len(pending_requests) if not pending_requests.empty else 0
         pending_bg = "rgba(255, 167, 145, 0.26)" if pending_count > 0 else "rgba(232, 212, 190, 0.24)"
         pending_border = "#F2A596" if pending_count > 0 else "#CBB39A"

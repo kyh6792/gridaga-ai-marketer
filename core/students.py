@@ -70,7 +70,8 @@ def run_student_ui():
         return 10
 
     def _resolve_course_price(course_name):
-        price_map = get_course_price_map()
+        # 코스/금액이 시트에서 바뀌면 즉시 반영
+        price_map = get_course_price_map(force_refresh=True)
         if course_name in price_map:
             return int(price_map[course_name] or 0)
         for k, v in price_map.items():
@@ -86,7 +87,8 @@ def run_student_ui():
         
         # 입력 폼
         with st.form("student_reg_form", clear_on_submit=True):
-            course_options = get_course_options()
+            # 코스가 시트에서 추가/수정되면 즉시 반영
+            course_options = get_course_options(force_refresh=True)
             if "student_reg_course_prev" not in st.session_state:
                 st.session_state["student_reg_course_prev"] = ""
             if "student_reg_total_prev" not in st.session_state:
@@ -374,11 +376,68 @@ def update_student_status(student_id, new_status, note_append=None):
         return False, f"상태 저장 실패: {e}"
 
 
+def update_student_profile(
+    student_id,
+    *,
+    name=None,
+    contact=None,
+    reg_date=None,
+    course=None,
+    total_sessions=None,
+    remain_sessions=None,
+    status=None,
+    memo=None,
+):
+    """명부 카드에서 기본 프로필 정보를 즉시 수정 저장합니다."""
+    try:
+        conn = get_conn()
+        df = _safe_read(conn, worksheet="students", ttl=0)
+        if df is None or df.empty:
+            return False, "명단을 불러올 수 없습니다."
+
+        df["ID"] = pd.to_numeric(df["ID"], errors="coerce").fillna(0).astype(int).astype(str)
+        idx = df.index[df["ID"] == str(student_id)].tolist()
+        if not idx:
+            return False, "수강생을 찾을 수 없습니다."
+        row_idx = idx[0]
+
+        for col in ["이름", "연락처", "등록일", "수강코스", "총 횟수", "잔여 횟수", "상태", "메모"]:
+            if col not in df.columns:
+                df[col] = ""
+
+        if name is not None:
+            df.at[row_idx, "이름"] = str(name).strip()
+        if contact is not None:
+            df.at[row_idx, "연락처"] = str(contact).strip()
+        if reg_date is not None:
+            if hasattr(reg_date, "strftime"):
+                df.at[row_idx, "등록일"] = reg_date.strftime("%Y-%m-%d")
+            else:
+                df.at[row_idx, "등록일"] = str(reg_date).strip()
+        if course is not None:
+            df.at[row_idx, "수강코스"] = str(course).strip()
+        if total_sessions is not None:
+            df.at[row_idx, "총 횟수"] = str(int(total_sessions))
+        if remain_sessions is not None:
+            df.at[row_idx, "잔여 횟수"] = str(int(remain_sessions))
+        if status is not None:
+            norm = _normalize_student_status(status)
+            df.at[row_idx, "상태"] = norm if norm in STUDENT_STATUS_OPTIONS else "재원"
+        if memo is not None:
+            df.at[row_idx, "메모"] = str(memo)
+
+        _safe_update(conn, worksheet="students", data=df)
+        return True, "원생 정보가 저장되었습니다."
+    except Exception as e:
+        return False, f"원생 정보 저장 실패: {e}"
+
+
 def display_student_list():
     """ID 기반 카드 UI + 출석 차감 버튼 통합 버전"""
     try:
         conn = get_conn()
-        df = _safe_read(conn, worksheet="students", ttl=15)
+        # 외부 시트 수정까지 즉시 반영되도록 캐시 비활성화
+        df = _safe_read(conn, worksheet="students", ttl=0)
         
         if df is not None and not df.empty:
             # 1. 데이터 타입 정돈 (ID 소수점 제거 및 숫자형 확정)
@@ -455,6 +514,49 @@ def display_student_list():
                                 st.rerun()
                             else:
                                 st.error(msg)
+
+                    with st.expander("수정", expanded=False):
+                        fresh_course_options = get_course_options(force_refresh=True)
+                        cur_course = str(row["수강코스"]) if pd.notna(row["수강코스"]) else ""
+                        course_candidates = list(fresh_course_options)
+                        if cur_course and cur_course not in course_candidates:
+                            course_candidates = [cur_course] + course_candidates
+                        if not course_candidates:
+                            course_candidates = ["기타"]
+                        try:
+                            default_course_idx = course_candidates.index(cur_course)
+                        except ValueError:
+                            default_course_idx = 0
+                        parsed_reg_date = pd.to_datetime(str(row.get("등록일", "")), errors="coerce")
+                        default_reg_date = parsed_reg_date if pd.notna(parsed_reg_date) else datetime.now()
+
+                        with st.form(f"student_edit_form_{row['ID']}"):
+                            edit_name = st.text_input("이름", value=str(row["이름"]))
+                            edit_contact = st.text_input("연락처", value=str(row["연락처"]))
+                            edit_reg_date = st.date_input("등록일", value=default_reg_date)
+                            edit_course = st.selectbox("수강코스", course_candidates, index=default_course_idx)
+                            edit_total = st.number_input("총 횟수", min_value=1, value=max(1, int(pd.to_numeric(row.get("총 횟수", 1), errors="coerce") or 1)))
+                            edit_remain = st.number_input("잔여 횟수", min_value=0, value=max(0, int(pd.to_numeric(row.get("잔여 횟수", 0), errors="coerce") or 0)))
+                            cur_status_for_edit = stu_status if stu_status in STUDENT_STATUS_OPTIONS else "재원"
+                            edit_status = st.selectbox("상태", list(STUDENT_STATUS_OPTIONS), index=list(STUDENT_STATUS_OPTIONS).index(cur_status_for_edit))
+                            edit_memo = st.text_area("메모", value=str(row.get("메모", "")))
+                            if st.form_submit_button("저장", use_container_width=True):
+                                ok, msg = update_student_profile(
+                                    row["ID"],
+                                    name=edit_name,
+                                    contact=edit_contact,
+                                    reg_date=edit_reg_date,
+                                    course=edit_course,
+                                    total_sessions=edit_total,
+                                    remain_sessions=edit_remain,
+                                    status=edit_status,
+                                    memo=edit_memo,
+                                )
+                                if ok:
+                                    st.success(msg)
+                                    st.rerun()
+                                else:
+                                    st.error(msg)
 
                     # 모바일에서 누르기 쉬운 단일 CTA (재원생만)
                     if stu_status == "재원":
