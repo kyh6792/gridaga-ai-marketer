@@ -119,20 +119,27 @@ def get_today_schedule_by_student(student_id):
     return view
 
 
-def run_schedule_ui():
+def run_schedule_ui(simple_mode=False):
     st.subheader("🗓 원생 시간표")
     conn, df = _read_or_init_schedule()
-
-    tab1, tab2, tab3, tab4 = st.tabs(["📋 시간표 보기", "🗂 월별 타임테이블", "➕ 일정 등록", "🗑 일정 삭제"])
-
-    with tab1:
-        _render_schedule_view(df)
-    with tab2:
-        _render_monthly_timetable(df)
-    with tab3:
-        _render_schedule_create(conn, df)
-    with tab4:
-        _render_schedule_delete(conn, df)
+    if simple_mode:
+        tab1, tab2, tab3 = st.tabs(["📋 시간표 보기", "🗂 월별 타임테이블", "➕ 일정 등록"])
+        with tab1:
+            _render_schedule_view(df)
+        with tab2:
+            _render_monthly_timetable(df)
+        with tab3:
+            _render_schedule_create(conn, df)
+    else:
+        tab1, tab2, tab3, tab4 = st.tabs(["📋 시간표 보기", "🗂 월별 타임테이블", "➕ 일정 등록", "🗑 일정 삭제"])
+        with tab1:
+            _render_schedule_view(df)
+        with tab2:
+            _render_monthly_timetable(df)
+        with tab3:
+            _render_schedule_create(conn, df)
+        with tab4:
+            _render_schedule_delete(conn, df)
 
 
 def _is_active_in_month(row, year, month):

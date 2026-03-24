@@ -71,7 +71,7 @@ def run_student_ui():
 
     def _resolve_course_price(course_name):
         # 코스/금액이 시트에서 바뀌면 즉시 반영
-        price_map = get_course_price_map(force_refresh=True)
+        price_map = get_course_price_map(force_refresh=False)
         if course_name in price_map:
             return int(price_map[course_name] or 0)
         for k, v in price_map.items():
@@ -79,16 +79,16 @@ def run_student_ui():
                 return int(v or 0)
         return 0
     
-    # 상단 탭 구성 (등록하기 / 명단보기 / 시간표)
-    tab1, tab2, tab3 = st.tabs(["📝 신규 등록", "📋 원생 명부", "🗓 시간표"])
-    
-    with tab1:
+    with st.expander("👥 원생 관리 및 등록", expanded=True):
+        student_tab1, student_tab2, student_tab3 = st.tabs(["📝 신규 등록", "📋 원생 명부", "✏️ 명부 수정"])
+
+    with student_tab1:
         st.write("새로운 수강생 정보를 입력해주세요.")
         
         # 입력 폼
         with st.form("student_reg_form", clear_on_submit=True):
             # 코스가 시트에서 추가/수정되면 즉시 반영
-            course_options = get_course_options(force_refresh=True)
+            course_options = get_course_options(force_refresh=False)
             if "student_reg_course_prev" not in st.session_state:
                 st.session_state["student_reg_course_prev"] = ""
             if "student_reg_total_prev" not in st.session_state:
@@ -171,10 +171,14 @@ def run_student_ui():
                 else:
                     st.error("이름과 연락처는 필수 입력 사항입니다.")
 
-    with tab2:
-        display_student_list()
-    with tab3:
-        run_schedule_ui()
+    with student_tab2:
+        display_student_list(show_mode="list")
+
+    with student_tab3:
+        display_student_list(show_mode="edit")
+
+    with st.expander("🗓 일정 관리 및 등록", expanded=False):
+        run_schedule_ui(simple_mode=True)
 def generate_student_id(df):
     """연도+순번 형태의 고유 ID 생성 (예: 26001)"""
     current_year_short = datetime.now().strftime("%y") # '26'
@@ -432,12 +436,12 @@ def update_student_profile(
         return False, f"원생 정보 저장 실패: {e}"
 
 
-def display_student_list():
+def display_student_list(show_mode="list"):
     """ID 기반 카드 UI + 출석 차감 버튼 통합 버전"""
     try:
         conn = get_conn()
-        # 외부 시트 수정까지 즉시 반영되도록 캐시 비활성화
-        df = _safe_read(conn, worksheet="students", ttl=0)
+        # 목록은 캐시 사용(읽기 요청 절감), 수정/저장 시 rerun으로 즉시 반영
+        df = _safe_read(conn, worksheet="students", ttl=15)
         
         if df is not None and not df.empty:
             # 1. 데이터 타입 정돈 (ID 소수점 제거 및 숫자형 확정)
@@ -451,8 +455,17 @@ def display_student_list():
 
             # 2. 상단 필터 UI
             st.markdown("---")
-            view_option = st.radio("🔍 보기 설정", ["재원생만", "전체 명단", "퇴원/휴원"], horizontal=True)
-            search_name = st.text_input("👤 이름 검색", placeholder="이름 입력")
+            view_option = st.radio(
+                "🔍 보기 설정",
+                ["재원생만", "전체 명단", "퇴원/휴원"],
+                horizontal=True,
+                key=f"student_list_view_option_{show_mode}",
+            )
+            search_name = st.text_input(
+                "👤 이름 검색",
+                placeholder="이름 입력",
+                key=f"student_list_search_name_{show_mode}",
+            )
 
             # 필터링 로직 적용
             display_df = df.copy()
@@ -488,35 +501,37 @@ def display_student_list():
                     count_style = "normal" if rem_count > 2 else "inverse"
                     st.metric("잔여 횟수", f"{rem_count}회", delta_color=count_style)
 
-                    with st.expander("재원 · 휴원 · 퇴원 설정", expanded=False):
-                        cur = stu_status if stu_status in STUDENT_STATUS_OPTIONS else "재원"
-                        idx_sel = list(STUDENT_STATUS_OPTIONS).index(cur)
-                        new_status = st.selectbox(
-                            "상태",
-                            list(STUDENT_STATUS_OPTIONS),
-                            index=idx_sel,
-                            key=f"status_sel_{row['ID']}",
-                            help="휴원: 복귀 예정 / 퇴원: 수강 종료. 재원으로 되돌리면 다시 출석·시간표에 포함됩니다.",
-                        )
-                        status_note = st.text_input(
-                            "메모에 남길 내용 (선택)",
-                            key=f"status_note_{row['ID']}",
-                            placeholder="예: 3월 한 달 휴원, 가족 일정",
-                        )
-                        if st.button("상태 저장", key=f"status_save_{row['ID']}", use_container_width=True):
-                            ok, msg = update_student_status(
-                                row["ID"],
-                                new_status,
-                                note_append=status_note.strip() or None,
+                    if show_mode != "edit":
+                        with st.expander("재원 · 휴원 · 퇴원 설정", expanded=False):
+                            cur = stu_status if stu_status in STUDENT_STATUS_OPTIONS else "재원"
+                            idx_sel = list(STUDENT_STATUS_OPTIONS).index(cur)
+                            new_status = st.selectbox(
+                                "상태",
+                                list(STUDENT_STATUS_OPTIONS),
+                                index=idx_sel,
+                                key=f"status_sel_{row['ID']}",
+                                help="휴원: 복귀 예정 / 퇴원: 수강 종료. 재원으로 되돌리면 다시 출석·시간표에 포함됩니다.",
                             )
-                            if ok:
-                                st.success(msg)
-                                st.rerun()
-                            else:
-                                st.error(msg)
+                            status_note = st.text_input(
+                                "메모에 남길 내용 (선택)",
+                                key=f"status_note_{row['ID']}",
+                                placeholder="예: 3월 한 달 휴원, 가족 일정",
+                            )
+                            if st.button("상태 저장", key=f"status_save_{row['ID']}", use_container_width=True):
+                                ok, msg = update_student_status(
+                                    row["ID"],
+                                    new_status,
+                                    note_append=status_note.strip() or None,
+                                )
+                                if ok:
+                                    st.success(msg)
+                                    st.rerun()
+                                else:
+                                    st.error(msg)
 
-                    with st.expander("수정", expanded=False):
-                        fresh_course_options = get_course_options(force_refresh=True)
+                    with st.expander("수정", expanded=(show_mode == "edit")):
+                        cur = stu_status if stu_status in STUDENT_STATUS_OPTIONS else "재원"
+                        fresh_course_options = get_course_options(force_refresh=False)
                         cur_course = str(row["수강코스"]) if pd.notna(row["수강코스"]) else ""
                         course_candidates = list(fresh_course_options)
                         if cur_course and cur_course not in course_candidates:
@@ -558,17 +573,18 @@ def display_student_list():
                                 else:
                                     st.error(msg)
 
-                    # 모바일에서 누르기 쉬운 단일 CTA (재원생만)
-                    if stu_status == "재원":
-                        if st.button("✅ 출석 처리 (1회 차감)", key=f"att_{row['ID']}", use_container_width=True):
-                            success, result = deduct_session(row['ID'])
-                            if success:
-                                st.toast(f"✅ {row['이름']}님 차감 완료! 남은 횟수: {result}회")
-                                st.rerun()
-                            else:
-                                st.error(result)
-                    else:
-                        st.info(f"「{stu_status}」 상태에서는 출석 차감을 사용할 수 없습니다. 복귀 시 상태를 「재원」으로 바꿔 주세요.")
+                    if show_mode != "edit":
+                        # 모바일에서 누르기 쉬운 단일 CTA (재원생만)
+                        if stu_status == "재원":
+                            if st.button("✅ 출석 처리 (1회 차감)", key=f"att_{row['ID']}", use_container_width=True):
+                                success, result = deduct_session(row['ID'])
+                                if success:
+                                    st.toast(f"✅ {row['이름']}님 차감 완료! 남은 횟수: {result}회")
+                                    st.rerun()
+                                else:
+                                    st.error(result)
+                        else:
+                            st.info(f"「{stu_status}」 상태에서는 출석 차감을 사용할 수 없습니다. 복귀 시 상태를 「재원」으로 바꿔 주세요.")
         else:
             st.info("아직 등록된 수강생이 없습니다. '신규 등록'에서 첫 학생을 등록해 보세요!")
             

@@ -7,6 +7,7 @@ from core.curriculum import get_course_price_map
 
 
 WORKSHEET_NAME = "finance_transactions"
+EXPENSE_WORKSHEET_NAME = "finance_expenses"
 BASE_COLUMNS = [
     "tx_id",
     "date",
@@ -22,6 +23,15 @@ BASE_COLUMNS = [
     "discount_value",
     "discount_amount",
     "event_name",
+    "note",
+]
+EXPENSE_COLUMNS = [
+    "ex_id",
+    "date",
+    "year_month",
+    "category",
+    "item",
+    "amount",
     "note",
 ]
 
@@ -42,6 +52,23 @@ def _read_or_init_transactions(ttl=0):
         if c not in df.columns:
             df[c] = ""
     return conn, df[BASE_COLUMNS].copy()
+
+
+def _read_or_init_expenses(ttl=0):
+    conn = get_conn()
+    try:
+        df = conn.read(worksheet=EXPENSE_WORKSHEET_NAME, ttl=ttl)
+    except Exception:
+        df = pd.DataFrame(columns=EXPENSE_COLUMNS)
+        conn.update(worksheet=EXPENSE_WORKSHEET_NAME, data=df)
+        df = conn.read(worksheet=EXPENSE_WORKSHEET_NAME, ttl=0)
+
+    if df is None or df.empty:
+        df = pd.DataFrame(columns=EXPENSE_COLUMNS)
+    for c in EXPENSE_COLUMNS:
+        if c not in df.columns:
+            df[c] = ""
+    return conn, df[EXPENSE_COLUMNS].copy()
 
 
 def _to_int_amount(v):
@@ -114,46 +141,19 @@ def run_finance_ui():
             _style()
     except Exception:
         pass
-    if "finance_detail_panel" not in st.session_state:
-        st.session_state["finance_detail_panel"] = "annual"
-
-    # 화면만: 짧은 TTL로 메뉴 탭 전환 시 동일 데이터 재네트워크 완화
     conn, df = _read_or_init_transactions(ttl=25)
+    ex_conn, ex_df = _read_or_init_expenses(ttl=25)
 
-    if df.empty:
-        st.info("아직 등록된 재무 거래가 없습니다. 원생 등록/재등록 시 자동 누적됩니다.")
-        return
-
-    view = df.copy()
+    view = df.copy() if df is not None else pd.DataFrame(columns=BASE_COLUMNS)
     view["amount"] = pd.to_numeric(view["amount"], errors="coerce").fillna(0).astype(int)
     view["year_month"] = view["year_month"].astype(str).str.strip()
     view["event_type"] = view["event_type"].astype(str).str.strip()
 
     year = datetime.now().year
-    ym_march = f"{year}-03"
+    ym_now = datetime.now().strftime("%Y-%m")
     year_prefix = f"{year}-"
-    year_view = view[view["year_month"].str.startswith(year_prefix, na=False)].copy()
-    march_view = view[view["year_month"] == ym_march].copy()
-
-    tx_filter = st.radio("거래 유형", ["전체", "등록만", "재등록만"], horizontal=True)
-    if tx_filter == "등록만":
-        year_view = year_view[year_view["event_type"] == "등록"].copy()
-        march_view = march_view[march_view["event_type"] == "등록"].copy()
-    elif tx_filter == "재등록만":
-        year_view = year_view[year_view["event_type"] == "재등록"].copy()
-        march_view = march_view[march_view["event_type"] == "재등록"].copy()
-
-    annual_total = int(year_view["amount"].sum()) if not year_view.empty else 0
-    march_total = int(march_view["amount"].sum()) if not march_view.empty else 0
-    year_reg_count = int((year_view["event_type"] == "등록").sum()) if not year_view.empty else 0
-    year_rereg_count = int((year_view["event_type"] == "재등록").sum()) if not year_view.empty else 0
-
-    st.caption(
-        f"필터 `{tx_filter}` · 올해 `{year}` · 3월 `{ym_march}` · "
-        f"연매출 **{annual_total:,}원** · 3월 **{march_total:,}원** · "
-        f"등록 **{year_reg_count}건** · 재등록 **{year_rereg_count}건**"
-    )
-    st.caption("아래 항목은 필요한 것만 펼쳐서 보세요.")
+    full_year_sales = view[view["year_month"].str.startswith(year_prefix, na=False)].copy()
+    full_month_sales = view[view["year_month"] == ym_now].copy()
 
     tx_cols = [
         "date",
@@ -169,63 +169,170 @@ def run_finance_ui():
         "tx_id",
     ]
 
-    with st.expander("📈 연 총매출", expanded=False):
-        st.subheader(f"📈 {year}년 연 총매출")
-        st.metric("합계", f"{annual_total:,}원")
-        if year_view.empty:
-            st.info("올해 거래 내역이 없습니다.")
-        else:
-            by_month = (
-                year_view.groupby("year_month", as_index=False)["amount"]
-                .sum()
-                .sort_values("year_month")
-            )
-            st.caption("월별 매출")
-            st.dataframe(by_month, use_container_width=True, hide_index=True)
-            st.caption("코스별 누적 (올해)")
-            course_sum = (
-                year_view.groupby("course", as_index=False)["amount"]
-                .sum()
-                .sort_values("amount", ascending=False)
-            )
-            st.dataframe(course_sum, use_container_width=True, hide_index=True)
+    ex_view = ex_df.copy() if ex_df is not None else pd.DataFrame(columns=EXPENSE_COLUMNS)
+    ex_view["amount"] = pd.to_numeric(ex_view["amount"], errors="coerce").fillna(0).astype(int)
+    ex_view["year_month"] = ex_view["year_month"].astype(str).str.strip()
 
-    with st.expander("📅 3월 매출", expanded=False):
-        st.subheader(f"📅 {ym_march} 매출")
-        st.metric("3월 합계", f"{march_total:,}원")
-        if march_view.empty:
-            st.info(f"{ym_march} 거래가 없습니다.")
-        else:
-            by_course = (
-                march_view.groupby("course", as_index=False)["amount"]
-                .sum()
-                .sort_values("amount", ascending=False)
-            )
-            st.caption("코스별")
-            st.dataframe(by_course, use_container_width=True, hide_index=True)
-            st.caption("거래 목록")
-            st.dataframe(
-                march_view.sort_values(by="date", ascending=False)[tx_cols],
-                use_container_width=True,
-                hide_index=True,
-            )
+    # 1) 원비 관리
+    with st.expander("💳 원비 관리", expanded=True):
+        year_view = full_year_sales.copy()
+        month_view = full_month_sales.copy()
 
-    with st.expander("📝 등록 건수", expanded=False):
-        st.subheader(f"📝 {year}년 등록 건수")
-        st.metric("등록", f"{year_reg_count}건")
-        reg_only = year_view[year_view["event_type"] == "등록"].sort_values("date", ascending=False)
-        if reg_only.empty:
-            st.info("올해 등록 거래가 없습니다.")
-        else:
-            st.dataframe(reg_only[tx_cols], use_container_width=True, hide_index=True)
+        tx_filter = st.radio("거래 유형", ["전체", "등록만", "재등록만"], horizontal=True)
+        if tx_filter == "등록만":
+            year_view = year_view[year_view["event_type"] == "등록"].copy()
+            month_view = month_view[month_view["event_type"] == "등록"].copy()
+        elif tx_filter == "재등록만":
+            year_view = year_view[year_view["event_type"] == "재등록"].copy()
+            month_view = month_view[month_view["event_type"] == "재등록"].copy()
 
-    with st.expander("🔁 재등록 건수", expanded=False):
-        st.subheader(f"🔁 {year}년 재등록 건수")
-        st.metric("재등록", f"{year_rereg_count}건")
-        rereg_only = year_view[year_view["event_type"] == "재등록"].sort_values("date", ascending=False)
-        if rereg_only.empty:
-            st.info("올해 재등록 거래가 없습니다.")
-        else:
-            st.dataframe(rereg_only[tx_cols], use_container_width=True, hide_index=True)
+        annual_total = int(year_view["amount"].sum()) if not year_view.empty else 0
+        month_total = int(month_view["amount"].sum()) if not month_view.empty else 0
+        year_reg_count = int((year_view["event_type"] == "등록").sum()) if not year_view.empty else 0
+        year_rereg_count = int((year_view["event_type"] == "재등록").sum()) if not year_view.empty else 0
 
-    # 하단 탭(월/주/전체)은 상단 상세와 정보가 중복되어 제거.
+        st.caption(
+            f"필터 `{tx_filter}` · 올해 `{year}` · 이번 달 `{ym_now}` · "
+            f"연매출 **{annual_total:,}원** · 월매출 **{month_total:,}원** · "
+            f"등록 **{year_reg_count}건** · 재등록 **{year_rereg_count}건**"
+        )
+
+        with st.expander("📈 연 총매출", expanded=False):
+            st.metric("합계", f"{annual_total:,}원")
+            if year_view.empty:
+                st.info("올해 거래 내역이 없습니다.")
+            else:
+                by_month = (
+                    year_view.groupby("year_month", as_index=False)["amount"]
+                    .sum()
+                    .sort_values("year_month")
+                )
+                st.caption("월별 매출")
+                st.dataframe(by_month, use_container_width=True, hide_index=True)
+                course_sum = (
+                    year_view.groupby("course", as_index=False)["amount"]
+                    .sum()
+                    .sort_values("amount", ascending=False)
+                )
+                st.caption("코스별 누적 (올해)")
+                st.dataframe(course_sum, use_container_width=True, hide_index=True)
+
+        with st.expander("📅 월별 매출", expanded=False):
+            st.metric("이번 달 합계", f"{month_total:,}원")
+            if month_view.empty:
+                st.info(f"{ym_now} 거래가 없습니다.")
+            else:
+                by_course = (
+                    month_view.groupby("course", as_index=False)["amount"]
+                    .sum()
+                    .sort_values("amount", ascending=False)
+                )
+                st.caption("코스별")
+                st.dataframe(by_course, use_container_width=True, hide_index=True)
+                st.caption("거래 목록")
+                st.dataframe(
+                    month_view.sort_values(by="date", ascending=False)[tx_cols],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+        with st.expander("📝 등록 건수", expanded=False):
+            st.metric("등록", f"{year_reg_count}건")
+            reg_only = year_view[year_view["event_type"] == "등록"].sort_values("date", ascending=False)
+            if reg_only.empty:
+                st.info("올해 등록 거래가 없습니다.")
+            else:
+                st.dataframe(reg_only[tx_cols], use_container_width=True, hide_index=True)
+
+        with st.expander("🔁 재등록 건수", expanded=False):
+            st.metric("재등록", f"{year_rereg_count}건")
+            rereg_only = year_view[year_view["event_type"] == "재등록"].sort_values("date", ascending=False)
+            if rereg_only.empty:
+                st.info("올해 재등록 거래가 없습니다.")
+            else:
+                st.dataframe(rereg_only[tx_cols], use_container_width=True, hide_index=True)
+
+    # 2) 비용 처리
+    with st.expander("🧾 비용 처리", expanded=False):
+        with st.expander("➕ 비용 등록", expanded=False):
+            with st.form("expense_create_form", clear_on_submit=True):
+                c1, c2 = st.columns(2)
+                with c1:
+                    ex_category = st.text_input("비용 분류", placeholder="예: 임대료, 재료비, 광고비")
+                    ex_item = st.text_input("항목명", placeholder="예: 3월 캔버스 구입")
+                with c2:
+                    ex_amount = st.number_input("비용 금액(원)", min_value=0, value=0, step=1000)
+                    ex_date = st.date_input("지출일", value=datetime.now())
+                ex_note = st.text_area("메모", placeholder="선택 입력")
+                if st.form_submit_button("비용 저장", use_container_width=True):
+                    if ex_amount <= 0:
+                        st.error("비용 금액은 0보다 커야 합니다.")
+                    else:
+                        now = datetime.now()
+                        new_row = pd.DataFrame([{
+                            "ex_id": f"ex_{now.strftime('%Y%m%d%H%M%S%f')}",
+                            "date": ex_date.strftime("%Y-%m-%d"),
+                            "year_month": ex_date.strftime("%Y-%m"),
+                            "category": str(ex_category).strip(),
+                            "item": str(ex_item).strip(),
+                            "amount": int(ex_amount),
+                            "note": str(ex_note).strip(),
+                        }])
+                        updated = pd.concat([ex_view, new_row], ignore_index=True) if not ex_view.empty else new_row
+                        ex_conn.update(worksheet=EXPENSE_WORKSHEET_NAME, data=updated)
+                        st.success("비용이 저장되었습니다.")
+                        st.rerun()
+
+        ex_year_view = ex_view[ex_view["year_month"].str.startswith(year_prefix, na=False)].copy()
+        ex_month_view = ex_view[ex_view["year_month"] == ym_now].copy()
+        annual_expense = int(ex_year_view["amount"].sum()) if not ex_year_view.empty else 0
+        month_expense = int(ex_month_view["amount"].sum()) if not ex_month_view.empty else 0
+        annual_expense_count = int(len(ex_year_view))
+
+        with st.expander("📉 연 총비용", expanded=False):
+            st.metric("연 총비용", f"{annual_expense:,}원")
+            if ex_year_view.empty:
+                st.info("올해 비용 데이터가 없습니다.")
+            else:
+                by_month_ex = (
+                    ex_year_view.groupby("year_month", as_index=False)["amount"]
+                    .sum()
+                    .sort_values("year_month")
+                )
+                st.caption("월별 비용")
+                st.dataframe(by_month_ex, use_container_width=True, hide_index=True)
+
+        with st.expander("🗓 월별 비용", expanded=False):
+            st.metric("이번 달 비용", f"{month_expense:,}원")
+            if ex_month_view.empty:
+                st.info(f"{ym_now} 비용 데이터가 없습니다.")
+            else:
+                st.dataframe(
+                    ex_month_view.sort_values(by="date", ascending=False)[["date", "category", "item", "amount", "note", "ex_id"]],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+        with st.expander("🔢 비용 등록건수", expanded=False):
+            st.metric("올해 등록건수", f"{annual_expense_count}건")
+
+    # 3) 총 비용(실질 수입)
+    with st.expander("📊 총 비용", expanded=False):
+        annual_sales_total = int(full_year_sales["amount"].sum()) if not full_year_sales.empty else 0
+        month_sales_total = int(full_month_sales["amount"].sum()) if not full_month_sales.empty else 0
+        annual_expense_total = int(
+            ex_view[ex_view["year_month"].str.startswith(year_prefix, na=False)]["amount"].sum()
+        ) if not ex_view.empty else 0
+        month_expense_total = int(
+            ex_view[ex_view["year_month"] == ym_now]["amount"].sum()
+        ) if not ex_view.empty else 0
+        annual_income = annual_sales_total - annual_expense_total
+        month_income = month_sales_total - month_expense_total
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.metric(f"{year}년 수입", f"{annual_income:,}원")
+            st.caption(f"연매출 {annual_sales_total:,}원 - 연비용 {annual_expense_total:,}원")
+        with c2:
+            st.metric(f"{ym_now} 수입", f"{month_income:,}원")
+            st.caption(f"월매출 {month_sales_total:,}원 - 월비용 {month_expense_total:,}원")
