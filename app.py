@@ -799,54 +799,16 @@ if st.session_state.get('intro_done'):
         st.caption("© 2026 작업실 그리다가. All rights reserved.")
     with fc2:
         _gd_connected = drive_oauth.has_valid_session_credentials()
-        _backup_after_oauth = str(st.query_params.get("backup_after_oauth", "")) == "1"
-
-        # OAuth 완료 후 자동 백업 1회 실행
-        if _gd_connected and _backup_after_oauth and not st.session_state.get("_backup_after_oauth_done"):
+        if st.button(
+            "백업하기",
+            key="manual_sheet_backup",
+            help="스프레드시트 전체 → Drive에 .json.gz 저장. 마케팅에서 Google 드라이브 연결 후 사용.",
+            disabled=not _gd_connected,
+        ):
             from core.sheet_backup import run_sheet_backup_now
 
             ok, msg = run_sheet_backup_now()
-            st.session_state["_backup_after_oauth_done"] = True
-            st.query_params.pop("backup_after_oauth", None)
             if ok:
                 st.success(f"백업 완료: `{msg}`")
             else:
                 st.error(f"백업 실패: {msg}")
-
-        if st.button(
-            "백업하기",
-            key="manual_sheet_backup",
-            help="스프레드시트 전체 → Drive에 .json.gz 저장. 연결 안 되어 있으면 로그인 후 자동 백업됩니다.",
-        ):
-            if _gd_connected:
-                from core.sheet_backup import run_sheet_backup_now
-
-                ok, msg = run_sheet_backup_now()
-                if ok:
-                    st.success(f"백업 완료: `{msg}`")
-                else:
-                    st.error(f"백업 실패: {msg}")
-            else:
-                if drive_oauth.oauth_google_drive_configured():
-                    cfg = getattr(drive_oauth, "_load_oauth_secrets", lambda: None)()
-                    make_url = getattr(drive_oauth, "build_google_drive_authorization_url", None)
-                    if cfg and callable(make_url):
-                        # 로그인 후 복귀 시 자동 백업 트리거용 마크
-                        st.query_params["backup_after_oauth"] = "1"
-                        auth_url = make_url(cfg)
-                        components.html(
-                            f"""
-                            <script>
-                              (function() {{
-                                try {{
-                                  const w = window.parent || window;
-                                  w.location.href = {auth_url!r};
-                                }} catch (e) {{}}
-                              }})();
-                            </script>
-                            """,
-                            height=0,
-                        )
-                        st.info("Google 로그인 페이지로 이동합니다...")
-                        st.stop()
-                st.error("Google Drive OAuth 설정이 없어 자동 로그인 백업을 사용할 수 없습니다.")
