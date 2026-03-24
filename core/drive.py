@@ -10,6 +10,15 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload, MediaIoBaseUpload
 from PIL import Image, ImageOps
 
+_HEIF_ENABLED = False
+try:
+    from pillow_heif import register_heif_opener
+
+    register_heif_opener()
+    _HEIF_ENABLED = True
+except Exception:
+    _HEIF_ENABLED = False
+
 # 시트 연결용 [connections.google_drive]에 들어 있는 앱 전용 키 (서비스 계정 JSON 아님)
 _DRIVE_SECRETS_APP_KEYS = frozenset({"folder_id", "spreadsheet", "backup_folder_id"})
 
@@ -126,8 +135,9 @@ def get_drive_image_list(folder_id):
         
         results = service.files().list(
             q=f"'{folder_id}' in parents and trashed = false and mimeType contains 'image/'",
-            fields="files(id, name, thumbnailLink, webViewLink, mimeType)",
-            pageSize=50,
+            fields="files(id, name, thumbnailLink, webViewLink, mimeType, modifiedTime)",
+            orderBy="modifiedTime desc,name_natural",
+            pageSize=300,
             supportsAllDrives=True,
             includeItemsFromAllDrives=True,
         ).execute()
@@ -254,12 +264,45 @@ def download_drive_image(file_id):
             st.error("⚠️ 드라이브에서 사진 데이터를 가져오지 못했습니다. (0바이트)")
             return None
 
-        # [수정] HEIC 파일일 경우를 대비해 아까 만든 안전한 오픈 함수를 쓰면 더 좋습니다.
-        # 일단은 기본 Image.open으로 테스트해보세요.
-        return Image.open(fh)
+        raw = fh.getvalue()
+        head = raw[:64]
+        low_head = head.lower()
+        # 권한/링크 문제 시 HTML이 내려오는 경우
+        if low_head.startswith(b"<") or b"<!doctype" in low_head or b"<html" in low_head:
+            st.error("⚠️ 드라이브 응답이 이미지가 아닙니다. 파일 권한/형식을 확인해주세요.")
+            return None
+        # iPhone HEIC(HEIF) 시그니처: ftpyheic/ftypheif 등
+        if len(raw) > 12 and raw[4:8] == b"ftyp" and raw[8:12] in (
+            b"heic",
+            b"heix",
+            b"hevc",
+            b"hevx",
+            b"mif1",
+            b"msf1",
+        ):
+            if not _HEIF_ENABLED:
+                st.error(
+                    "⚠️ HEIC/HEIF 형식입니다. 서버에 `pillow-heif`가 필요합니다. "
+                    "설치 전에는 JPG/PNG로 변환해 업로드해주세요."
+                )
+                return None
+
+        img = Image.open(io.BytesIO(raw))
+        img.load()
+        if img.mode in ("RGBA", "P", "LA"):
+            img = img.convert("RGB")
+        return img
         
     except Exception as e:
-        st.error(f"❌ 드라이브 사진 다운로드 중 에러: {e}")
+        msg = str(e)
+        if "cannot identify image file" in msg:
+            st.error(
+                "❌ 이미지 형식을 열 수 없습니다. "
+                "아이폰 HEIC/HEIF 파일이거나 손상 파일일 수 있습니다.\n"
+                "→ JPG/PNG로 변환해서 다시 시도해주세요."
+            )
+        else:
+            st.error(f"❌ 드라이브 사진 다운로드 중 에러: {e}")
         return None
 
 
@@ -300,13 +343,44 @@ def display_drive_selector():
         st.warning("⚠️ 드라이브 폴더가 비어있거나 사진을 찾을 수 없습니다.")
         return None, ""
 
-    # [핵심] 제목과 설정 컨트롤러를 한 줄에 나란히 배치
-    header_col1, header_col2 = st.columns([2, 1], vertical_alignment="bottom")
-    with header_col1:
-        st.markdown("### 🖼️ 분석할 작품을 선택하세요")
-    with header_col2:
-        # 사용자가 원하는 열(Column) 개수를 선택 (기본값: 4개)
-        num_cols = st.selectbox("한 줄에 몇 개씩 볼까요?", [2, 3, 4, 5, 6], index=2)
+    # HEIC/HEIF 등 PIL 미리보기 불가 가능성이 큰 파일 안내
+    heic_like = []
+    for f in files:
+        n = str(f.get("name", "")).lower()
+        m = str(f.get("mimeType", "")).lower()
+        if n.endswith((".heic", ".heif")) or "heic" in m or "heif" in m:
+            heic_like.append(f.get("name", ""))
+    if heic_like and not _HEIF_ENABLED:
+        st.info(
+            "현재 HEIC/HEIF 미리보기가 완전 지원되지 않아 일부 파일에서 오류가 날 수 있습니다. "
+            "가능하면 JPG/PNG를 사용해주세요."
+        )
+
+    st.markdown("### 🖼️ 분석할 작품을 선택하세요")
+    num_cols = 3
+
+    ctrl1, ctrl2 = st.columns([2, 1], vertical_alignment="bottom")
+    with ctrl1:
+        query = st.text_input("파일명 검색", placeholder="예: 원데이, 2026-03, 아이폰")
+    with ctrl2:
+        per_page = st.selectbox("페이지당", [12, 24, 48], index=1)
+
+    q = (query or "").strip().lower()
+    if q:
+        files = [f for f in files if q in str(f.get("name", "")).lower()]
+
+    if not files:
+        st.info("검색 결과가 없습니다.")
+        return None, ""
+
+    total = len(files)
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    page = st.number_input("페이지", min_value=1, max_value=total_pages, value=1, step=1)
+    page = int(page)
+    start = (page - 1) * per_page
+    end = min(start + per_page, total)
+    files = files[start:end]
+    st.caption(f"총 {total}개 중 {start + 1}-{end} 표시")
 
     st.divider() # 시각적 구분선 추가
     

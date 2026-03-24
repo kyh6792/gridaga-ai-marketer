@@ -1,6 +1,8 @@
 import streamlit as st
 import streamlit.components.v1 as components
 from datetime import datetime, timedelta
+import base64
+from pathlib import Path
 
 # 배포본 core/ui.py 버전이 달라도 ImportError 나지 않게 모듈 단위로 로드
 import core.ui as _ui
@@ -60,15 +62,13 @@ from core import drive_oauth
 drive_oauth.try_finish_google_drive_oauth()
 
 # --- 2. 인트로 화면 실행 ---
-# 새로고침 시 세션이 바뀌어도 인트로 반복을 막기 위해 query param 사용
-skip_intro = str(st.query_params.get("skip_intro", "0"))
-if skip_intro == "1":
-    st.session_state["intro_done"] = True
-else:
-    # intro 폴더의 로고를 짧게 노출 (모바일 체감 개선)
+# mode가 없는 진입 화면에서만 세션당 1회 재생 (skip_intro 쿼리 의존 제거)
+qp_mode_for_intro = str(st.query_params.get("mode", ""))
+if qp_mode_for_intro not in ("student", "owner"):
     display_intro("intro/logo.jpg", duration=1.5)
-    if st.session_state.get("intro_done"):
-        st.query_params["skip_intro"] = "1"
+else:
+    # URL로 바로 진입(student/owner)한 경우도 메인 렌더는 진행되어야 함
+    st.session_state["intro_done"] = True
 
 def init_entry_state():
     defaults = {
@@ -156,8 +156,22 @@ def sync_owner_session_from_query():
 
 
 def render_intro_branch():
-    st.markdown(
-        """
+    student_bg = "linear-gradient(120deg, #C09066 0%, #B47F57 55%, #A86E48 100%)"
+    teacher_bg = "linear-gradient(120deg, #9E6B43 0%, #8E5F3D 58%, #7E5233 100%)"
+    try:
+        root = Path(__file__).resolve().parent
+        s_path = root / "assets" / "student_bt.png"
+        t_path = root / "assets" / "teacher_bt.png"
+        if s_path.exists():
+            s_b64 = base64.b64encode(s_path.read_bytes()).decode("ascii")
+            student_bg = f"url('data:image/png;base64,{s_b64}') center/cover no-repeat"
+        if t_path.exists():
+            t_b64 = base64.b64encode(t_path.read_bytes()).decode("ascii")
+            teacher_bg = f"url('data:image/png;base64,{t_b64}') center/cover no-repeat"
+    except Exception:
+        pass
+
+    css = """
         <style>
         .home-welcome-card {
             border: 1px solid #B78F6A;
@@ -180,12 +194,40 @@ def render_intro_branch():
             font-size: 0.93rem;
             line-height: 1.4;
         }
+        div[data-testid="stButton"] > button.entry-student-btn,
+        div[data-testid="stButton"] > button.entry-teacher-btn {
+            border: none !important;
+            box-shadow: none !important;
+            color: #4A3526 !important;
+            font-weight: 700 !important;
+            min-height: 54px !important;
+            transition: transform 120ms ease, filter 120ms ease !important;
+        }
+        div[data-testid="stButton"] > button.entry-student-btn {
+            background: __STUDENT_BG__ !important;
+            background-size: cover !important;
+            background-position: center !important;
+            background-repeat: no-repeat !important;
+        }
+        div[data-testid="stButton"] > button.entry-teacher-btn {
+            background: __TEACHER_BG__ !important;
+            background-size: cover !important;
+            background-position: center !important;
+            background-repeat: no-repeat !important;
+        }
+        div[data-testid="stButton"] > button.entry-student-btn:active,
+        div[data-testid="stButton"] > button.entry-teacher-btn:active {
+            transform: translateY(2px) scale(0.988) !important;
+            filter: brightness(0.93) !important;
+        }
         </style>
         <div class="home-welcome-card">
             <p class="home-welcome-title">작업실 그리다가</p>
             <p class="home-welcome-sub">오늘도 반가워요. 아래에서 사용자 유형을 선택해 주세요.</p>
         </div>
-        """,
+    """
+    st.markdown(
+        css.replace("__STUDENT_BG__", student_bg).replace("__TEACHER_BG__", teacher_bg),
         unsafe_allow_html=True,
     )
     if st.button("🎓 원생용", use_container_width=True, key="entry_student"):
@@ -200,6 +242,30 @@ def render_intro_branch():
         st.session_state["entry_mode"] = "owner"
         st.query_params["mode"] = "owner"
         st.rerun()
+
+    components.html(
+        """
+        <script>
+        (function () {
+          const doc = window.parent && window.parent.document ? window.parent.document : document;
+          function applyEntryBtnClass() {
+            try {
+              const btns = doc.querySelectorAll('div[data-testid="stButton"] > button');
+              btns.forEach((b) => {
+                const t = (b.innerText || "").trim();
+                if (t.includes("원생용")) b.classList.add("entry-student-btn");
+                if (t.includes("선생님")) b.classList.add("entry-teacher-btn");
+              });
+            } catch (e) {}
+          }
+          applyEntryBtnClass();
+          setTimeout(applyEntryBtnClass, 80);
+          setTimeout(applyEntryBtnClass, 250);
+        })();
+        </script>
+        """,
+        height=0,
+    )
 
 
 def render_student_entry():
@@ -355,7 +421,7 @@ def render_owner_menu():
         failed_log_requests = get_failed_log_requests(limit=20)
         recent_logs = get_recent_attendance_logs(limit=3)
         pending_count = len(pending_requests) if not pending_requests.empty else 0
-        pending_bg = "#B37B5E" if pending_count > 0 else "#E8D4BE"
+        pending_bg = "rgba(179, 123, 94, 0.72)" if pending_count > 0 else "rgba(232, 212, 190, 0.68)"
         pending_border = "#8F5C44" if pending_count > 0 else "#B78F6A"
         pending_text = "#FFF8F2" if pending_count > 0 else "#4A3526"
 
@@ -367,7 +433,7 @@ def render_owner_menu():
                     <div style="font-size:12px;color:{pending_text};">승인대기 수</div>
                     <div style="font-size:20px;font-weight:700;color:{pending_text};line-height:1.1;">{pending_count}</div>
                 </div>
-                <div style="border:1px solid #B78F6A;border-radius:12px;background:#E8D4BE;padding:7px;min-height:66px;">
+                <div style="border:1px solid #B78F6A;border-radius:12px;background:rgba(232,212,190,0.62);padding:7px;min-height:66px;">
                     <div style="font-size:12px;color:#6D5543;">최근 갱신</div>
                     <div style="font-size:20px;font-weight:700;color:#4A3526;line-height:1.1;">{datetime.now().strftime('%H:%M')}</div>
                 </div>

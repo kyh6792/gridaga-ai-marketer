@@ -2,6 +2,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 import time
 import base64
+import json
 from pathlib import Path
 from PIL import Image
 # core/ui_style.py (또는 ui.py)
@@ -206,8 +207,13 @@ def display_intro(image_path, duration=2.5):
     """인트로 화면 표시 및 스타일 주입"""
     # 1. 스타일 먼저 적용
     set_custom_style()
-    
-    if 'intro_done' not in st.session_state:
+    try:
+        duration = max(3.0, float(duration))
+    except Exception:
+        duration = 3.0
+
+    # intro_done 키가 있어도 False면 다시 인트로 재생
+    if not st.session_state.get('intro_done', False):
         intro_place = st.empty()
         with intro_place.container():
             try:
@@ -684,6 +690,38 @@ def apply_owner_dashboard_style():
             color: #4A3526 !important;
             font-weight: 700 !important;
         }
+        /* 주메뉴 버튼 고정 스타일: js가 실패해도 key 기반으로 유지 */
+        .st-key-owner-menu-slot-0 div[data-testid="stButton"] > button,
+        .st-key-owner-menu-slot-1 div[data-testid="stButton"] > button,
+        .st-key-owner-menu-slot-2 div[data-testid="stButton"] > button,
+        .st-key-owner-menu-slot-3 div[data-testid="stButton"] > button {
+            color: #4A3526 !important;
+            border: none !important;
+            box-shadow: none !important;
+            transition: transform 120ms ease, filter 120ms ease, box-shadow 120ms ease !important;
+        }
+        .st-key-owner-menu-slot-0 div[data-testid="stButton"] > button { background: __MENU_BTN1_BG__ !important; background-size: cover !important; background-position: center !important; background-repeat: no-repeat !important; }
+        .st-key-owner-menu-slot-1 div[data-testid="stButton"] > button { background: __MENU_BTN2_BG__ !important; background-size: cover !important; background-position: center !important; background-repeat: no-repeat !important; }
+        .st-key-owner-menu-slot-2 div[data-testid="stButton"] > button { background: __MENU_BTN3_BG__ !important; background-size: cover !important; background-position: center !important; background-repeat: no-repeat !important; }
+        .st-key-owner-menu-slot-3 div[data-testid="stButton"] > button { background: __MENU_BTN4_BG__ !important; background-size: cover !important; background-position: center !important; background-repeat: no-repeat !important; }
+        .st-key-owner-menu-slot-0 div[data-testid="stButton"] > button[kind="primary"] { background: __MENU_BTN1_BG__ !important; }
+        .st-key-owner-menu-slot-1 div[data-testid="stButton"] > button[kind="primary"] { background: __MENU_BTN2_BG__ !important; }
+        .st-key-owner-menu-slot-2 div[data-testid="stButton"] > button[kind="primary"] { background: __MENU_BTN3_BG__ !important; }
+        .st-key-owner-menu-slot-3 div[data-testid="stButton"] > button[kind="primary"] { background: __MENU_BTN4_BG__ !important; }
+        .st-key-owner-menu-slot-0 div[data-testid="stButton"] > button:hover,
+        .st-key-owner-menu-slot-1 div[data-testid="stButton"] > button:hover,
+        .st-key-owner-menu-slot-2 div[data-testid="stButton"] > button:hover,
+        .st-key-owner-menu-slot-3 div[data-testid="stButton"] > button:hover {
+            filter: brightness(1.08) saturate(1.05) !important;
+        }
+        .st-key-owner-menu-slot-0 div[data-testid="stButton"] > button:active,
+        .st-key-owner-menu-slot-1 div[data-testid="stButton"] > button:active,
+        .st-key-owner-menu-slot-2 div[data-testid="stButton"] > button:active,
+        .st-key-owner-menu-slot-3 div[data-testid="stButton"] > button:active {
+            transform: translateY(4px) scale(0.975) !important;
+            filter: brightness(0.78) saturate(0.9) contrast(1.04) !important;
+            box-shadow: inset 0 4px 12px rgba(46, 30, 18, 0.42), 0 0 0 rgba(0,0,0,0) !important;
+        }
         .menu-brush-img {
             margin: 0.02rem 0 0.15rem 0;
             opacity: 0.95;
@@ -795,36 +833,58 @@ def render_owner_menu_grid(owner_login_at, active_idx=None):
         cur = int(st.session_state.get("owner_menu_index", active_idx if active_idx is not None else 0))
         is_active = cur == idx
         with col:
-            if st.button(
-                label,
-                key=f"owner_menu_btn_{idx}",
-                use_container_width=True,
-                type="primary" if is_active else "secondary",
-            ):
-                st.session_state["owner_menu_index"] = idx
-                st.query_params["owner_menu_idx"] = str(idx)
+            with st.container(key=f"owner-menu-slot-{idx}"):
+                if st.button(
+                    label,
+                    key=f"owner_menu_btn_{idx}",
+                    use_container_width=True,
+                    type="primary" if is_active else "secondary",
+                ):
+                    st.session_state["owner_menu_index"] = idx
+                    st.query_params["owner_menu_idx"] = str(idx)
 
     _menu_btn(row1[0], items[0][0], items[0][1])
     _menu_btn(row1[1], items[1][0], items[1][1])
     _menu_btn(row2[0], items[2][0], items[2][1])
     _menu_btn(row2[1], items[3][0], items[3][1])
 
+    bg_map = {
+        "마케팅": _asset_css_bg("butten1.png", "linear-gradient(120deg, #C09066 0%, #B47F57 55%, #A86E48 100%)"),
+        "원생관리": _asset_css_bg("butten2.png", "linear-gradient(120deg, #C09066 0%, #B47F57 55%, #A86E48 100%)"),
+        "재무": _asset_css_bg("butten3.png", "linear-gradient(120deg, #C09066 0%, #B47F57 55%, #A86E48 100%)"),
+        "커리큘럼": _asset_css_bg("butten4.png", "linear-gradient(120deg, #C09066 0%, #B47F57 55%, #A86E48 100%)"),
+        "로그아웃": _asset_css_bg("logout.png", "linear-gradient(120deg, #9E6B43 0%, #8E5F3D 58%, #7E5233 100%)"),
+    }
+    bg_map_js = json.dumps(bg_map, ensure_ascii=False)
+
     # st.button은 클래스 지정이 안 되므로, 마케팅 버튼 텍스트 기준으로 클래스 부여
-    components.html(
-        """
+    js = """
         <script>
         (function () {
           const doc = window.parent && window.parent.document ? window.parent.document : document;
+          const bgMap = __BG_MAP_JS__;
+
+          function applyBg(btn, bg) {
+            if (!bg) return;
+            btn.style.setProperty("background", bg, "important");
+            btn.style.setProperty("background-size", "cover", "important");
+            btn.style.setProperty("background-position", "center", "important");
+            btn.style.setProperty("background-repeat", "no-repeat", "important");
+            btn.style.setProperty("border", "none", "important");
+            btn.style.setProperty("box-shadow", "none", "important");
+            btn.style.setProperty("color", "#4A3526", "important");
+          }
+
           function applyMenuButtonClasses() {
             try {
               const btns = doc.querySelectorAll('div[data-testid="stButton"] > button');
               btns.forEach((b) => {
                 const t = (b.innerText || "").trim();
-                if (t.includes("마케팅")) b.classList.add("menu-btn1");
-                if (t.includes("원생관리")) b.classList.add("menu-btn2");
-                if (t.includes("재무")) b.classList.add("menu-btn3");
-                if (t.includes("커리큘럼")) b.classList.add("menu-btn4");
-                if (t.includes("로그아웃")) b.classList.add("menu-btn-logout");
+                if (t.includes("마케팅")) applyBg(b, bgMap["마케팅"]);
+                if (t.includes("원생관리")) applyBg(b, bgMap["원생관리"]);
+                if (t.includes("재무")) applyBg(b, bgMap["재무"]);
+                if (t.includes("커리큘럼")) applyBg(b, bgMap["커리큘럼"]);
+                if (t.includes("로그아웃")) applyBg(b, bgMap["로그아웃"]);
               });
             } catch (e) {}
           }
@@ -841,6 +901,5 @@ def render_owner_menu_grid(owner_login_at, active_idx=None):
           } catch (e) {}
         })();
         </script>
-        """,
-        height=0,
-    )
+    """
+    components.html(js.replace("__BG_MAP_JS__", bg_map_js), height=0)
