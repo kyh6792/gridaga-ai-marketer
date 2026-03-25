@@ -7,6 +7,16 @@ from core.database import get_conn
 
 
 WORKSHEET_NAME = "curriculum"
+_CURRICULUM_NEXT_READ_FRESH = "_curriculum_next_read_fresh"
+
+
+def _mark_curriculum_dirty():
+    """커리큘럼 쓰기 직후 다음 조회 1회는 ttl 캐시를 우회."""
+    st.session_state[_CURRICULUM_NEXT_READ_FRESH] = True
+
+
+def _curriculum_read_ttl(default_ttl=60):
+    return 0 if st.session_state.pop(_CURRICULUM_NEXT_READ_FRESH, False) else default_ttl
 
 
 DEFAULT_CURRICULUM_ROWS = [
@@ -219,7 +229,7 @@ def _load_curriculum(ttl=60):
 
 def run_curriculum_ui():
     st.header("📚 커리큘럼")
-    conn, df = _load_curriculum()
+    conn, df = _load_curriculum(ttl=_curriculum_read_ttl())
 
     section = st.segmented_control(
         "커리큘럼 메뉴",
@@ -310,6 +320,7 @@ def _render_course_manage(conn, df):
             }])
             updated = pd.concat([df, new_row], ignore_index=True) if not df.empty else new_row
             _safe_update(conn, worksheet=WORKSHEET_NAME, data=updated)
+            _mark_curriculum_dirty()
             st.success("코스가 추가되었습니다.")
             st.rerun()
 
@@ -326,6 +337,7 @@ def _render_course_manage(conn, df):
         target_id = del_options[selected]
         updated = df[df["id"].astype(str) != str(target_id)].copy()
         _safe_update(conn, worksheet=WORKSHEET_NAME, data=updated)
+        _mark_curriculum_dirty()
         st.success("코스가 삭제되었습니다.")
         st.rerun()
 
@@ -352,6 +364,7 @@ def _render_curriculum_create(conn, df):
             }])
             updated = pd.concat([df, new_row], ignore_index=True) if not df.empty else new_row
             _safe_update(conn, worksheet=WORKSHEET_NAME, data=updated)
+            _mark_curriculum_dirty()
             st.success("커리큘럼 항목이 등록되었습니다.")
             st.rerun()
 
@@ -373,6 +386,7 @@ def _render_curriculum_delete(conn, df):
             if st.button("삭제", key=f"delete_cur_{row_id}", use_container_width=True):
                 updated = df[df["id"].astype(str) != row_id].copy()
                 _safe_update(conn, worksheet=WORKSHEET_NAME, data=updated)
+                _mark_curriculum_dirty()
                 st.success("삭제되었습니다.")
                 st.rerun()
 
@@ -420,6 +434,7 @@ def _render_curriculum_bulk_edit(conn, df):
                     edited.at[i, "created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         _safe_update(conn, worksheet=WORKSHEET_NAME, data=edited)
+        _mark_curriculum_dirty()
         st.success("일괄 수정 내용이 저장되었습니다.")
         st.rerun()
 

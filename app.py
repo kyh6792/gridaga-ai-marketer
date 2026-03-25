@@ -58,6 +58,11 @@ approve_attendance_request = getattr(
     "approve_attendance_request",
     lambda *args, **kwargs: (False, "승인 기능을 불러오지 못했습니다."),
 )
+approve_all_pending_requests = getattr(
+    _students,
+    "approve_all_pending_requests",
+    lambda *args, **kwargs: (False, "전체 승인 기능을 불러오지 못했습니다."),
+)
 reject_attendance_request = getattr(
     _students,
     "reject_attendance_request",
@@ -67,6 +72,15 @@ get_failed_log_requests = getattr(
     _students,
     "get_failed_log_requests",
     lambda *args, **kwargs: pd.DataFrame(),
+)
+get_owner_dashboard_data = getattr(
+    _students,
+    "get_owner_dashboard_data",
+    lambda *args, **kwargs: (
+        pd.DataFrame(),
+        pd.DataFrame(),
+        pd.DataFrame(),
+    ),
 )
 retry_failed_log_request = getattr(
     _students,
@@ -305,8 +319,8 @@ def render_intro_branch():
 
 
 def render_student_entry():
-    st.subheader("🎓 원생 출석")
-    st.caption("ID를 입력하면 오늘 수업 1회가 차감됩니다.")
+    st.subheader("🎓 출석 하기")
+    st.caption("ID를 입력하면 오늘 수업 1 회가 차감됩니다.")
     st.markdown(
         """
         <style>
@@ -314,30 +328,33 @@ def render_student_entry():
         div[data-testid="stButton"] > button {
             width: 100% !important;
             box-sizing: border-box !important;
-            padding: 0.4rem 0.2rem !important;
-            min-height: 44px !important;
-            font-size: 0.95rem !important;
+            padding: 0.34rem 0.18rem !important;
+            min-height: 40px !important;
+            font-size: 0.9rem !important;
         }
         /* Streamlit 모바일 자동 스택 방지: 키패드 3열 강제 유지 */
         div[data-testid="stHorizontalBlock"] {
             display: flex !important;
+            flex-direction: row !important;
             flex-wrap: nowrap !important;
             gap: 0.25rem !important;
         }
+        div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"],
         div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
-            flex: 1 1 0 !important;
+            flex: 0 0 33.333% !important;
             min-width: 0 !important;
             max-width: 33.33% !important;
+            width: 33.33% !important;
         }
         /* 세로 모드(좁은 폭)에서 추가 축소 */
         @media (max-width: 480px) {
             div[data-testid="stButton"] > button {
-                padding: 0.3rem 0.08rem !important;
-                min-height: 40px !important;
-                font-size: 0.85rem !important;
+                padding: 0.26rem 0.06rem !important;
+                min-height: 34px !important;
+                font-size: 0.8rem !important;
             }
             div[data-testid="stHorizontalBlock"] {
-                gap: 0.18rem !important;
+                gap: 0.14rem !important;
             }
         }
         </style>
@@ -345,7 +362,12 @@ def render_student_entry():
         unsafe_allow_html=True,
     )
     current_id = st.session_state.get("student_id_input", "")
-    st.code(current_id if current_id else "ID를 입력하세요", language="text")
+    st.markdown(
+        f"<div style='border:1px solid #d8c3ac;border-radius:8px;padding:6px 10px;background:#fff8f0;font-weight:600;'>"
+        f"{current_id if current_id else 'ID를 입력하세요'}</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown("<div style='height:10px;'></div>", unsafe_allow_html=True)
     if current_id:
         today_df = get_today_schedule_by_student(current_id)
         if today_df is not None and not today_df.empty:
@@ -383,39 +405,35 @@ def render_student_entry():
                     st.session_state["student_message_type"] = ""
                     st.rerun()
 
-    if st.button("입력값 지우기", use_container_width=True, key="id_clear"):
-        st.session_state["student_id_input"] = ""
-        st.session_state["student_message"] = ""
-        st.session_state["student_message_type"] = ""
-        st.rerun()
+    action_col1, action_col2 = st.columns(2, gap="small")
+    with action_col1:
+        if st.button("✅ 확인", type="primary", use_container_width=True):
+            student_id = st.session_state.get("student_id_input", "").strip()
+            if not student_id:
+                st.session_state["student_message"] = "ID를 먼저 입력해주세요."
+                st.session_state["student_message_type"] = "error"
+                st.rerun()
 
-    if st.button("✅ 확인 (1회 차감)", type="primary", use_container_width=True):
-        student_id = st.session_state.get("student_id_input", "").strip()
-        if not student_id:
-            st.session_state["student_message"] = "ID를 먼저 입력해주세요."
-            st.session_state["student_message_type"] = "error"
+            success, result = create_attendance_request(student_id)
+            if success:
+                st.session_state["student_message"] = f"✅ {result} (원장 승인 후 차감됩니다)"
+                st.session_state["student_message_type"] = "success"
+                st.session_state["student_id_input"] = ""
+            else:
+                st.session_state["student_message"] = str(result)
+                st.session_state["student_message_type"] = "error"
             st.rerun()
-
-        success, result = create_attendance_request(student_id)
-        if success:
-            st.session_state["student_message"] = f"✅ {result} (원장 승인 후 차감됩니다)"
-            st.session_state["student_message_type"] = "success"
-            st.session_state["student_id_input"] = ""
-        else:
-            st.session_state["student_message"] = str(result)
-            st.session_state["student_message_type"] = "error"
-        st.rerun()
-
-    if st.button("🛑 요청 취소", use_container_width=True, key="cancel_attendance_request"):
-        student_id = st.session_state.get("student_id_input", "").strip()
-        if not student_id:
-            st.session_state["student_message"] = "취소하려면 ID를 먼저 입력해주세요."
-            st.session_state["student_message_type"] = "error"
+    with action_col2:
+        if st.button("🛑 요청 취소", use_container_width=True, key="cancel_attendance_request"):
+            student_id = st.session_state.get("student_id_input", "").strip()
+            if not student_id:
+                st.session_state["student_message"] = "취소하려면 ID를 먼저 입력해주세요."
+                st.session_state["student_message_type"] = "error"
+                st.rerun()
+            ok, msg = cancel_pending_attendance_request(student_id)
+            st.session_state["student_message"] = str(msg)
+            st.session_state["student_message_type"] = "success" if ok else "error"
             st.rerun()
-        ok, msg = cancel_pending_attendance_request(student_id)
-        st.session_state["student_message"] = str(msg)
-        st.session_state["student_message_type"] = "success" if ok else "error"
-        st.rerun()
 
     st.markdown("---")
     if st.button("⬅️ 처음으로", use_container_width=True, key="back_from_student"):
@@ -481,10 +499,12 @@ def render_owner_menu():
     render_owner_brand_header()
 
     def render_dashboard_cards():
-        # 승인/거절 직후 즉시 반영되도록 대시보드 캐시를 우회
-        pending_requests = get_pending_attendance_requests(limit=20)
-        failed_log_requests = get_failed_log_requests(limit=20)
-        recent_logs = get_recent_attendance_logs(limit=3)
+        pending_requests, failed_log_requests, recent_logs = get_owner_dashboard_data(
+            pending_limit=20,
+            failed_limit=20,
+            recent_limit=3,
+            force_refresh=False,
+        )
         pending_count = len(pending_requests) if not pending_requests.empty else 0
         pending_bg = "rgba(255, 167, 145, 0.26)" if pending_count > 0 else "rgba(232, 212, 190, 0.24)"
         pending_border = "#F2A596" if pending_count > 0 else "#CBB39A"
@@ -514,7 +534,149 @@ def render_owner_menu():
             height=66,
         )
 
-        st.markdown("### 승인 하기")
+        approve_bg = "linear-gradient(120deg, #8ECF9B 0%, #6FB47F 100%)"
+        reject_bg = "linear-gradient(120deg, #E7A4A4 0%, #D58282 100%)"
+        try:
+            root = Path(__file__).resolve().parent
+            ap_path = root / "assets" / "approved.png"
+            rj_path = root / "assets" / "rejected.png"
+            if ap_path.exists():
+                ap_b64 = base64.b64encode(ap_path.read_bytes()).decode("ascii")
+                approve_bg = f"url('data:image/png;base64,{ap_b64}') center/cover no-repeat"
+            if rj_path.exists():
+                rj_b64 = base64.b64encode(rj_path.read_bytes()).decode("ascii")
+                reject_bg = f"url('data:image/png;base64,{rj_b64}') center/cover no-repeat"
+        except Exception:
+            pass
+
+        components.html(
+            f"""
+            <style>
+            div[data-testid="stButton"] > button.approve-art-btn {{
+                background: {approve_bg} !important;
+                background-size: cover !important;
+                background-position: center !important;
+                background-repeat: no-repeat !important;
+                border: none !important;
+                box-shadow: 0 3px 8px rgba(0, 0, 0, 0.18) !important;
+                color: #ffffff !important;
+                text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35) !important;
+                transition: transform 120ms ease, filter 120ms ease, box-shadow 120ms ease !important;
+            }}
+            div[data-testid="stButton"] > button.approve-art-btn *,
+            div[data-testid="stButton"] > button.approve-art-btn p,
+            div[data-testid="stButton"] > button.approve-art-btn span {{
+                color: #ffffff !important;
+                fill: #ffffff !important;
+            }}
+            div[data-testid="stButton"] > button.reject-art-btn {{
+                background: {reject_bg} !important;
+                background-size: cover !important;
+                background-position: center !important;
+                background-repeat: no-repeat !important;
+                border: none !important;
+                box-shadow: 0 3px 8px rgba(0, 0, 0, 0.18) !important;
+                color: #ffffff !important;
+                text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35) !important;
+                transition: transform 120ms ease, filter 120ms ease, box-shadow 120ms ease !important;
+            }}
+            div[data-testid="stButton"] > button.approve-art-btn:hover,
+            div[data-testid="stButton"] > button.reject-art-btn:hover {{
+                filter: brightness(1.06) saturate(1.04) !important;
+                box-shadow: 0 5px 12px rgba(0, 0, 0, 0.22) !important;
+            }}
+            div[data-testid="stButton"] > button.approve-art-btn:active,
+            div[data-testid="stButton"] > button.reject-art-btn:active {{
+                transform: translateY(2px) scale(0.985) !important;
+                filter: brightness(0.92) !important;
+                box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25) !important;
+            }}
+            div[data-testid="stButton"] > button.reject-art-btn *,
+            div[data-testid="stButton"] > button.reject-art-btn p,
+            div[data-testid="stButton"] > button.reject-art-btn span {{
+                color: #ffffff !important;
+                fill: #ffffff !important;
+            }}
+            </style>
+            <script>
+            (function () {{
+              const doc = window.parent && window.parent.document ? window.parent.document : document;
+              function applyApproveRejectStyles() {{
+                try {{
+                  const btns = doc.querySelectorAll('div[data-testid="stButton"] > button');
+                  btns.forEach((b) => {{
+                    const t = (b.innerText || "").trim();
+                    if (t.includes("승인")) {{
+                      b.classList.add("approve-art-btn");
+                      b.style.setProperty("background", "{approve_bg}", "important");
+                      b.style.setProperty("background-size", "cover", "important");
+                      b.style.setProperty("background-position", "center", "important");
+                      b.style.setProperty("background-repeat", "no-repeat", "important");
+                      b.style.setProperty("border", "none", "important");
+                      b.style.setProperty("box-shadow", "none", "important");
+                      b.style.setProperty("color", "#ffffff", "important");
+                      const hb = b.closest('div[data-testid="stHorizontalBlock"]');
+                      if (hb) {{
+                        hb.style.setProperty("display", "flex", "important");
+                        hb.style.setProperty("flex-direction", "row", "important");
+                        hb.style.setProperty("flex-wrap", "nowrap", "important");
+                        hb.style.setProperty("gap", "0.35rem", "important");
+                        Array.from(hb.children).forEach((c) => {{
+                          c.style.setProperty("width", "50%", "important");
+                          c.style.setProperty("max-width", "50%", "important");
+                          c.style.setProperty("min-width", "0", "important");
+                          c.style.setProperty("flex", "0 0 50%", "important");
+                        }});
+                      }}
+                    }}
+                    if (t.includes("거절")) {{
+                      b.classList.add("reject-art-btn");
+                      b.style.setProperty("background", "{reject_bg}", "important");
+                      b.style.setProperty("background-size", "cover", "important");
+                      b.style.setProperty("background-position", "center", "important");
+                      b.style.setProperty("background-repeat", "no-repeat", "important");
+                      b.style.setProperty("border", "none", "important");
+                      b.style.setProperty("box-shadow", "none", "important");
+                      b.style.setProperty("color", "#ffffff", "important");
+                      const hb = b.closest('div[data-testid="stHorizontalBlock"]');
+                      if (hb) {{
+                        hb.style.setProperty("display", "flex", "important");
+                        hb.style.setProperty("flex-direction", "row", "important");
+                        hb.style.setProperty("flex-wrap", "nowrap", "important");
+                        hb.style.setProperty("gap", "0.35rem", "important");
+                        Array.from(hb.children).forEach((c) => {{
+                          c.style.setProperty("width", "50%", "important");
+                          c.style.setProperty("max-width", "50%", "important");
+                          c.style.setProperty("min-width", "0", "important");
+                          c.style.setProperty("flex", "0 0 50%", "important");
+                        }});
+                      }}
+                    }}
+                  }});
+                }} catch (e) {{}}
+              }}
+              applyApproveRejectStyles();
+              setTimeout(applyApproveRejectStyles, 60);
+              setTimeout(applyApproveRejectStyles, 250);
+              setTimeout(applyApproveRejectStyles, 600);
+            }})();
+            </script>
+            """,
+            height=0,
+        )
+
+        h1, h2 = st.columns([2, 1], gap="small")
+        with h1:
+            st.markdown("### 승인 하기")
+        with h2:
+            if pending_count > 0:
+                if st.button("✅ 전체 승인", use_container_width=True, key="approve_all_pending"):
+                    ok, msg = approve_all_pending_requests(limit=200)
+                    if ok:
+                        st.success(msg)
+                    else:
+                        st.error(msg)
+                    st.rerun()
         if pending_requests.empty:
             st.info("승인 대기 요청이 없습니다.")
         else:

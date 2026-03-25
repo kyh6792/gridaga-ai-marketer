@@ -90,92 +90,92 @@ def run_student_ui():
 
         if student_section == "📝 신규 등록":
             st.write("새로운 수강생 정보를 입력해주세요.")
-            
-            # 입력 폼
-            with st.form("student_reg_form", clear_on_submit=True):
-                # 코스가 시트에서 추가/수정되면 즉시 반영
-                course_options = get_course_options(force_refresh=False)
-                if "student_reg_course_prev" not in st.session_state:
-                    st.session_state["student_reg_course_prev"] = ""
-                if "student_reg_total_prev" not in st.session_state:
-                    st.session_state["student_reg_total_prev"] = 10
-    
-                name = st.text_input("이름", placeholder="이름을 입력하세요")
-                contact = st.text_input("연락처", placeholder="010-0000-0000")
-                course = st.selectbox("수강 코스", course_options, key="student_reg_course")
-                suggested_sessions = _suggest_sessions(course)
-    
-                prev_course = st.session_state.get("student_reg_course_prev", "")
-                prev_total = int(st.session_state.get("student_reg_total_prev", 10))
-                default_total = prev_total
-                if (not prev_course) or (course != prev_course and prev_total == _suggest_sessions(prev_course)):
-                    default_total = suggested_sessions
-    
-                total_sessions = st.number_input(
-                    "결제 횟수 (횟수제)",
-                    min_value=1,
-                    value=int(default_total),
-                    key="student_reg_total_input",
+            # 코스/할인/금액이 선택 즉시 반영되도록 form 대신 일반 위젯 사용
+            course_options = get_course_options(force_refresh=False)
+            if "student_reg_course_prev" not in st.session_state:
+                st.session_state["student_reg_course_prev"] = ""
+            if "student_reg_total_prev" not in st.session_state:
+                st.session_state["student_reg_total_prev"] = 10
+
+            name = st.text_input("이름", placeholder="이름을 입력하세요", key="student_reg_name")
+            contact = st.text_input("연락처", placeholder="010-0000-0000", key="student_reg_contact")
+            course = st.selectbox("수강 코스", course_options, key="student_reg_course")
+            suggested_sessions = _suggest_sessions(course)
+            st.markdown("**결제 정보**")
+
+            prev_course = st.session_state.get("student_reg_course_prev", "")
+            prev_total = int(st.session_state.get("student_reg_total_prev", 10))
+            default_total = prev_total
+            if (not prev_course) or (course != prev_course and prev_total == _suggest_sessions(prev_course)):
+                default_total = suggested_sessions
+
+            total_sessions = st.number_input(
+                "결제 횟수 (횟수제)",
+                min_value=1,
+                value=int(default_total),
+                key="student_reg_total_input",
+            )
+            st.caption(f"추천 횟수: {suggested_sessions}회 (코스 기준, 직접 수정 가능)")
+
+            base_amount = int(_resolve_course_price(course))
+            discount_type = st.selectbox(
+                "할인 유형",
+                ["없음", "정액 할인", "정률 할인(%)", "이벤트가 직접입력"],
+                key="student_reg_discount_type",
+            )
+            event_name = ""
+            discount_value = 0
+            discount_amount = 0
+            final_amount = base_amount
+
+            if discount_type == "정액 할인":
+                discount_value = int(
+                    st.number_input("할인 금액(원)", min_value=0, value=0, step=1000, key="student_reg_discount_fixed")
                 )
-                st.caption(f"추천 횟수: {suggested_sessions}회 (코스 기준, 직접 수정 가능)")
-    
-                base_amount = int(_resolve_course_price(course))
-                discount_type = st.selectbox("할인 유형", ["없음", "정액 할인", "정률 할인(%)", "이벤트가 직접입력"])
-                event_name = ""
-                discount_value = 0
-                discount_amount = 0
-                final_amount = base_amount
-    
-                if discount_type == "정액 할인":
-                    discount_value = int(
-                        st.number_input("할인 금액(원)", min_value=0, value=0, step=1000)
-                    )
-                    discount_amount = min(discount_value, base_amount)
-                    final_amount = max(0, base_amount - discount_amount)
-                elif discount_type == "정률 할인(%)":
-                    discount_value = int(
-                        st.number_input("할인율(%)", min_value=0, max_value=100, value=0, step=5)
-                    )
-                    discount_amount = int(round(base_amount * (discount_value / 100.0)))
-                    final_amount = max(0, base_amount - discount_amount)
-                elif discount_type == "이벤트가 직접입력":
-                    event_name = st.text_input("이벤트명", placeholder="예: 봄맞이 원데이 20%")
-                    final_amount = int(
-                        st.number_input("최종 결제금액(원)", min_value=0, value=int(base_amount), step=1000)
-                    )
-                    discount_amount = max(0, base_amount - final_amount)
-                    discount_value = discount_amount
-    
-                st.caption(
-                    f"원가 **{base_amount:,}원** · 할인 **{discount_amount:,}원** · 최종 **{final_amount:,}원**"
+                discount_amount = min(discount_value, base_amount)
+                final_amount = max(0, base_amount - discount_amount)
+            elif discount_type == "정률 할인(%)":
+                discount_value = int(
+                    st.number_input("할인율(%)", min_value=0, max_value=100, value=0, step=5, key="student_reg_discount_rate")
                 )
-    
-                st.session_state["student_reg_course_prev"] = course
-                st.session_state["student_reg_total_prev"] = int(total_sessions)
-                
-                reg_date = st.date_input("등록일", value=datetime.now())
-                memo = st.text_area("특이사항 및 메모")
-                
-                submit_btn = st.form_submit_button("✅ 수강생 등록하기", use_container_width=True)
-                
-                if submit_btn:
-                    if name and contact:
-                        save_student_to_sheet(
-                            name,
-                            contact,
-                            reg_date,
-                            course,
-                            total_sessions,
-                            memo,
-                            final_amount=final_amount,
-                            base_amount=base_amount,
-                            discount_type=discount_type,
-                            discount_value=discount_value,
-                            discount_amount=discount_amount,
-                            event_name=event_name,
-                        )
-                    else:
-                        st.error("이름과 연락처는 필수 입력 사항입니다.")
+                discount_amount = int(round(base_amount * (discount_value / 100.0)))
+                final_amount = max(0, base_amount - discount_amount)
+            elif discount_type == "이벤트가 직접입력":
+                event_name = st.text_input("이벤트명", placeholder="예: 봄맞이 원데이 20%", key="student_reg_event_name")
+                final_amount = int(
+                    st.number_input("최종 결제금액(원)", min_value=0, value=int(base_amount), step=1000, key="student_reg_final_amount")
+                )
+                discount_amount = max(0, base_amount - final_amount)
+                discount_value = discount_amount
+
+            st.caption(
+                f"원가 **{base_amount:,}원** · 할인 **{discount_amount:,}원** · 최종 **{final_amount:,}원**"
+            )
+
+            st.session_state["student_reg_course_prev"] = course
+            st.session_state["student_reg_total_prev"] = int(total_sessions)
+
+            reg_date = st.date_input("등록일", value=datetime.now(), key="student_reg_date")
+            memo = st.text_area("특이사항 및 메모", key="student_reg_memo")
+
+            if st.button("✅ 수강생 등록하기", use_container_width=True, key="student_reg_submit"):
+                if name and contact:
+                    save_student_to_sheet(
+                        name,
+                        contact,
+                        reg_date,
+                        course,
+                        total_sessions,
+                        memo,
+                        final_amount=final_amount,
+                        base_amount=base_amount,
+                        discount_type=discount_type,
+                        discount_value=discount_value,
+                        discount_amount=discount_amount,
+                        event_name=event_name,
+                    )
+                else:
+                    st.error("이름과 연락처는 필수 입력 사항입니다.")
     
         elif student_section == "📋 원생 명부":
             display_student_list(show_mode="list")
@@ -327,6 +327,20 @@ def _normalize_student_status(series_or_val):
         return s.replace("", "재원")
     v = str(series_or_val).strip() if series_or_val is not None and not pd.isna(series_or_val) else ""
     return v if v else "재원"
+
+
+def _normalize_student_id_text(v):
+    """'26002.0' 같은 표기를 '26002'로 정규화."""
+    try:
+        s = "" if v is None or (hasattr(pd, "isna") and pd.isna(v)) else str(v).strip()
+        if not s:
+            return ""
+        n = pd.to_numeric(s, errors="coerce")
+        if pd.notna(n):
+            return str(int(float(n)))
+        return s
+    except Exception:
+        return str(v).strip()
 
 
 def _get_latest_reg_event_map(ttl=60):
@@ -589,7 +603,10 @@ def display_student_list(show_mode="list"):
                             if st.button("✅ 출석 처리 (1회 차감)", key=f"att_{row['ID']}", use_container_width=True):
                                 success, result = deduct_session(row['ID'])
                                 if success:
-                                    st.toast(f"✅ {row['이름']}님 차감 완료! 남은 횟수: {result}회")
+                                    if datetime.now().weekday() == 6:
+                                        st.toast("✅ 일요일은 출석을 레슨 없는 자율 작업 날이라 승인해도 차감되지 않습니다.")
+                                    else:
+                                        st.toast(f"✅ {row['이름']}님 차감 완료! 남은 횟수: {result}회")
                                     st.rerun()
                                 else:
                                     st.error(result)
@@ -608,6 +625,7 @@ def deduct_session(student_id, request_meta=None):
         
         # ID 타입 일치 (문자열로 비교)
         df["ID"] = pd.to_numeric(df["ID"], errors='coerce').fillna(0).astype(int).astype(str)
+        student_id = _normalize_student_id_text(student_id)
         
         # 해당 학생 찾기
         idx = df.index[df["ID"] == str(student_id)].tolist()
@@ -690,6 +708,7 @@ def create_attendance_request(student_id):
             return False, "등록된 수강생이 없습니다."
 
         df["ID"] = pd.to_numeric(df["ID"], errors='coerce').fillna(0).astype(int).astype(str)
+        student_id = _normalize_student_id_text(student_id)
         idx = df.index[df["ID"] == str(student_id)].tolist()
         if not idx:
             return False, "수강생을 찾을 수 없습니다."
@@ -753,6 +772,7 @@ def cancel_pending_attendance_request(student_id):
         if "student_id" not in req_df.columns or "status" not in req_df.columns:
             return False, "요청 데이터 형식이 올바르지 않습니다."
 
+        student_id = _normalize_student_id_text(student_id)
         target = req_df[
             (req_df["student_id"].astype(str) == str(student_id))
             & (req_df["status"].astype(str) == "pending")
@@ -790,6 +810,41 @@ def get_pending_attendance_requests(limit=20, force_refresh: bool = False):
         return pd.DataFrame(columns=["request_id", "time", "student_id", "student_name", "status", "approved_time"])
 
 
+def get_owner_dashboard_data(
+    pending_limit=20,
+    failed_limit=20,
+    recent_limit=3,
+    force_refresh: bool = False,
+):
+    """운영 대시보드용 통합 조회(요청/실패/최근로그). 시트 read 횟수를 최소화합니다."""
+    try:
+        conn = get_conn()
+        req_df = _get_attendance_requests_raw_cached(conn, force_refresh=force_refresh)
+
+        if req_df is None or req_df.empty:
+            pending = pd.DataFrame(columns=["request_id", "time", "student_id", "student_name", "status", "approved_time"])
+            failed = pending.copy()
+        else:
+            req_work = req_df.copy()
+            if "time" in req_work.columns:
+                req_work = req_work.sort_values(by="time", ascending=False)
+            pending = req_work[req_work["status"].astype(str) == "pending"].head(pending_limit).copy() if "status" in req_work.columns else pd.DataFrame()
+
+            failed_work = req_df.copy()
+            if "approved_time" in failed_work.columns:
+                failed_work = failed_work.sort_values(by="approved_time", ascending=False)
+            failed = failed_work[failed_work["status"].astype(str) == "approved_log_failed"].head(failed_limit).copy() if "status" in failed_work.columns else pd.DataFrame()
+
+        recent = get_recent_attendance_logs(limit=recent_limit, force_refresh=force_refresh)
+        return pending, failed, recent
+    except Exception:
+        empty_req = pd.DataFrame(columns=["request_id", "time", "student_id", "student_name", "status", "approved_time"])
+        empty_log = pd.DataFrame(
+            columns=["time", "student_id", "student_name", "remain_count", "event", "request_id", "request_time", "approved_time"]
+        )
+        return empty_req, empty_req.copy(), empty_log
+
+
 def approve_attendance_request(request_id):
     """원장이 요청을 승인하면 실제 1회 차감합니다."""
     try:
@@ -809,7 +864,7 @@ def approve_attendance_request(request_id):
         # 이전 실패 메시지가 남아 상태 판정에 영향 주지 않도록 초기화
         st.session_state["attendance_log_error"] = ""
 
-        student_id = str(req_df.at[row_idx, "student_id"])
+        student_id = _normalize_student_id_text(req_df.at[row_idx, "student_id"])
         request_time = str(req_df.at[row_idx, "time"])
         approved_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         is_sunday = datetime.now().weekday() == 6
@@ -836,10 +891,43 @@ def approve_attendance_request(request_id):
         if str(req_df.at[row_idx, "status"]) == "approved_log_failed":
             return True, f"{student_name}님 차감은 완료되었지만 로그 저장은 실패했습니다. (재시도 필요)"
         if is_sunday:
-            return True, f"{student_name}님 일요일 자유드로잉 출석 처리 완료! (미차감, 남은 횟수: {result}회)"
+            return True, "일요일은 출석을 레슨 없는 자율 작업 날이라 승인해도 차감되지 않습니다."
         return True, f"{student_name}님 승인 완료! 남은 횟수: {result}회"
     except Exception as e:
         return False, f"승인 처리 실패: {e}"
+
+
+def approve_all_pending_requests(limit=200):
+    """대기중 요청을 최신순으로 일괄 승인합니다."""
+    try:
+        pending_df = get_pending_attendance_requests(limit=limit, force_refresh=True)
+        if pending_df is None or pending_df.empty:
+            return False, "승인할 대기 요청이 없습니다."
+
+        success_cnt = 0
+        fail_cnt = 0
+        fail_msgs = []
+
+        for _, row in pending_df.iterrows():
+            req_id = str(row.get("request_id", "")).strip()
+            if not req_id:
+                fail_cnt += 1
+                continue
+            ok, msg = approve_attendance_request(req_id)
+            if ok:
+                success_cnt += 1
+            else:
+                fail_cnt += 1
+                if len(fail_msgs) < 3:
+                    fail_msgs.append(str(msg))
+
+        if fail_cnt == 0:
+            return True, f"전체 승인 완료: {success_cnt}건"
+        extra = f" / 실패 {fail_cnt}건"
+        detail = f" (예: {' | '.join(fail_msgs)})" if fail_msgs else ""
+        return True, f"일괄 처리: 승인 {success_cnt}건{extra}{detail}"
+    except Exception as e:
+        return False, f"전체 승인 실패: {e}"
 
 
 def reject_attendance_request(request_id):
