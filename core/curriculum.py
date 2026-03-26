@@ -4,6 +4,7 @@ from datetime import datetime
 import re
 import time
 from core.database import get_conn
+from core.perf import perf_log
 
 
 WORKSHEET_NAME = "curriculum"
@@ -228,6 +229,7 @@ def _load_curriculum(ttl=60):
 
 
 def run_curriculum_ui():
+    _t0 = time.perf_counter()
     st.header("📚 커리큘럼")
     conn, df = _load_curriculum(ttl=_curriculum_read_ttl())
 
@@ -247,6 +249,7 @@ def run_curriculum_ui():
         _render_curriculum_delete(conn, df)
     else:
         _render_curriculum_bulk_edit(conn, df)
+    perf_log("curriculum.run_curriculum_ui", (time.perf_counter() - _t0) * 1000.0)
 
 
 def _render_curriculum_view(df):

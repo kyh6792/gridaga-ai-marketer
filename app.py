@@ -1,9 +1,11 @@
 import streamlit as st
 import streamlit.components.v1 as components
 from datetime import datetime, timedelta
+import time
 import base64
 from pathlib import Path
 import pandas as pd
+from core.perf import perf_log, perf_enabled, perf_recent_top
 
 # 배포본 core/ui.py 버전이 달라도 ImportError 나지 않게 모듈 단위로 로드
 import core.ui as _ui
@@ -125,6 +127,7 @@ def init_entry_state():
     defaults = {
         "entry_mode": None,
         "owner_authenticated": False,
+        "owner_auth_method": "",
         "student_id_input": "",
         "student_message": "",
         "student_message_type": "",
@@ -196,6 +199,8 @@ def sync_owner_session_from_query():
         st.session_state["owner_login_at"] = qp_login_at
     if is_owner_session_valid():
         st.session_state["owner_authenticated"] = True
+        if not st.session_state.get("owner_auth_method"):
+            st.session_state["owner_auth_method"] = "password"
 
     try:
         qp_menu_idx = int(str(st.query_params.get("owner_menu_idx", "0")))
@@ -449,27 +454,61 @@ def render_student_entry():
 
 def render_owner_auth():
     st.subheader("🧑‍🏫 원장 인증")
-    owner_password = get_owner_password()
-    if not owner_password:
-        st.warning("원장 비밀번호가 설정되지 않았습니다. `st.secrets`에 `owner_password`를 추가해주세요.")
+    oauth_ready = drive_oauth.oauth_google_drive_configured()
+    if oauth_ready:
+        # Google OAuth 완료 직후 자동으로 원장 세션 진입
+        if drive_oauth.has_valid_session_credentials():
+            st.session_state["owner_authenticated"] = True
+            st.session_state["owner_auth_method"] = "google"
+            if not st.session_state.get("owner_login_at"):
+                st.session_state["owner_login_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            st.query_params["mode"] = "owner"
+            st.query_params["owner_login_at"] = st.session_state["owner_login_at"]
+            st.rerun()
 
-    with st.form("owner_login_form", clear_on_submit=True):
-        pwd = st.text_input("비밀번호", type="password", placeholder="원장 비밀번호 입력")
-        submitted = st.form_submit_button("로그인", use_container_width=True)
-        if submitted:
-            if owner_password and pwd == owner_password:
+        if drive_oauth.has_valid_session_credentials():
+            if st.button("Google 계정으로 로그인하기", use_container_width=True, key="owner_google_login"):
                 st.session_state["owner_authenticated"] = True
+                st.session_state["owner_auth_method"] = "google"
                 st.session_state["owner_login_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 st.query_params["mode"] = "owner"
                 st.query_params["owner_login_at"] = st.session_state["owner_login_at"]
                 st.rerun()
-            st.error("비밀번호가 올바르지 않습니다.")
+        else:
+            try:
+                cfg = drive_oauth._load_oauth_secrets()  # 내부 helper 재사용
+                auth_url = drive_oauth.build_google_drive_authorization_url(cfg) if cfg else ""
+            except Exception:
+                auth_url = ""
+            if auth_url:
+                st.link_button("Google 계정으로 로그인하기", auth_url, use_container_width=True)
+            else:
+                st.error("Google OAuth 설정을 확인해 주세요.")
+
+    owner_password = get_owner_password()
+    if owner_password:
+        with st.expander("비밀번호로 로그인(예비 수단)", expanded=not oauth_ready):
+            with st.form("owner_login_form", clear_on_submit=True):
+                pwd = st.text_input("비밀번호", type="password", placeholder="원장 비밀번호 입력")
+                submitted = st.form_submit_button("로그인", use_container_width=True)
+                if submitted:
+                    if pwd == owner_password:
+                        st.session_state["owner_authenticated"] = True
+                        st.session_state["owner_auth_method"] = "password"
+                        st.session_state["owner_login_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        st.query_params["mode"] = "owner"
+                        st.query_params["owner_login_at"] = st.session_state["owner_login_at"]
+                        st.rerun()
+                    st.error("비밀번호가 올바르지 않습니다.")
+    elif not oauth_ready:
+        st.warning("원장 인증 수단이 없습니다. Google OAuth 또는 `owner_password` 설정이 필요합니다.")
 
     st.markdown("---")
     if st.button("⬅️ 처음으로", use_container_width=True, key="back_from_owner"):
         st.session_state["entry_mode"] = None
         st.session_state["intro_done"] = False
         st.session_state["owner_authenticated"] = False
+        st.session_state["owner_auth_method"] = ""
         st.session_state["owner_login_at"] = ""
         st.query_params.pop("mode", None)
         st.query_params.pop("owner_login_at", None)
@@ -478,12 +517,21 @@ def render_owner_auth():
 
 
 def render_owner_menu():
+    _t_owner = time.perf_counter()
+    auto_backup_enabled = False
     try:
-        from core.sheet_backup import maybe_run_daily_sheet_backup
-
-        maybe_run_daily_sheet_backup()
+        if "AUTO_DAILY_BACKUP" in st.secrets:
+            auto_backup_enabled = str(st.secrets["AUTO_DAILY_BACKUP"]).strip().lower() in ("1", "true", "yes", "on")
     except Exception:
-        pass
+        auto_backup_enabled = False
+    if auto_backup_enabled and not st.session_state.get("_owner_daily_backup_checked_once"):
+        try:
+            from core.sheet_backup import maybe_run_daily_sheet_backup
+
+            maybe_run_daily_sheet_backup()
+        except Exception:
+            pass
+        st.session_state["_owner_daily_backup_checked_once"] = True
 
     # 메뉴 전환 시 lazy import 비용이 한 박자처럼 느껴지지 않도록, 원장 화면에서 1회만 선로딩
     if not st.session_state.get("_owner_feature_modules_preloaded"):
@@ -498,407 +546,70 @@ def render_owner_menu():
     apply_owner_dashboard_style()
     render_owner_brand_header()
 
-    def render_dashboard_cards():
-        pending_requests, failed_log_requests, recent_logs = get_owner_dashboard_data(
-            pending_limit=20,
-            failed_limit=20,
-            recent_limit=3,
-            force_refresh=False,
-        )
-        pending_count = len(pending_requests) if not pending_requests.empty else 0
-        pending_bg = "rgba(255, 167, 145, 0.26)" if pending_count > 0 else "rgba(232, 212, 190, 0.24)"
-        pending_border = "#F2A596" if pending_count > 0 else "#CBB39A"
-        pending_text = "#6F2E27" if pending_count > 0 else "#5B4638"
-        if isinstance(recent_logs, pd.DataFrame):
-            recent_has_value = not recent_logs.empty
-        else:
-            recent_has_value = bool(recent_logs)
-        recent_bg = "rgba(156, 216, 255, 0.24)" if recent_has_value else "rgba(232, 212, 190, 0.22)"
-        recent_border = "#8FCFF2" if recent_has_value else "#CBB39A"
-        recent_text = "#224C66" if recent_has_value else "#5B4638"
-
-        # 승인대기 수 / 최근 갱신 반반 카드 (모바일 고정)
-        components.html(
-            f"""
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:7px;margin:0 0 10px 0;">
-                <div style="border:1px solid {pending_border};border-radius:9px;background:{pending_bg};padding:5px;min-height:44px;">
-                    <div style="font-size:10px;color:{pending_text};">승인대기 수</div>
-                    <div style="font-size:14px;font-weight:700;color:{pending_text};line-height:1.05;">{pending_count}</div>
-                </div>
-                <div style="border:1px solid {recent_border};border-radius:9px;background:{recent_bg};padding:5px;min-height:44px;">
-                    <div style="font-size:10px;color:{recent_text};">최근 갱신</div>
-                    <div style="font-size:14px;font-weight:700;color:{recent_text};line-height:1.05;">{datetime.now().strftime('%H:%M')}</div>
-                </div>
-            </div>
-            """,
-            height=66,
-        )
-
-        approve_bg = "linear-gradient(120deg, #8ECF9B 0%, #6FB47F 100%)"
-        reject_bg = "linear-gradient(120deg, #E7A4A4 0%, #D58282 100%)"
-        try:
-            root = Path(__file__).resolve().parent
-            ap_path = root / "assets" / "approved.png"
-            rj_path = root / "assets" / "rejected.png"
-            if ap_path.exists():
-                ap_b64 = base64.b64encode(ap_path.read_bytes()).decode("ascii")
-                approve_bg = f"url('data:image/png;base64,{ap_b64}') center/cover no-repeat"
-            if rj_path.exists():
-                rj_b64 = base64.b64encode(rj_path.read_bytes()).decode("ascii")
-                reject_bg = f"url('data:image/png;base64,{rj_b64}') center/cover no-repeat"
-        except Exception:
-            pass
-
-        components.html(
-            f"""
-            <style>
-            div[data-testid="stButton"] > button.approve-art-btn {{
-                background: {approve_bg} !important;
-                background-size: cover !important;
-                background-position: center !important;
-                background-repeat: no-repeat !important;
-                border: none !important;
-                box-shadow: 0 3px 8px rgba(0, 0, 0, 0.18) !important;
-                color: #ffffff !important;
-                text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35) !important;
-                transition: transform 120ms ease, filter 120ms ease, box-shadow 120ms ease !important;
-            }}
-            div[data-testid="stButton"] > button.approve-art-btn *,
-            div[data-testid="stButton"] > button.approve-art-btn p,
-            div[data-testid="stButton"] > button.approve-art-btn span {{
-                color: #ffffff !important;
-                fill: #ffffff !important;
-            }}
-            div[data-testid="stButton"] > button.reject-art-btn {{
-                background: {reject_bg} !important;
-                background-size: cover !important;
-                background-position: center !important;
-                background-repeat: no-repeat !important;
-                border: none !important;
-                box-shadow: 0 3px 8px rgba(0, 0, 0, 0.18) !important;
-                color: #ffffff !important;
-                text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35) !important;
-                transition: transform 120ms ease, filter 120ms ease, box-shadow 120ms ease !important;
-            }}
-            div[data-testid="stButton"] > button.approve-art-btn:hover,
-            div[data-testid="stButton"] > button.reject-art-btn:hover {{
-                filter: brightness(1.06) saturate(1.04) !important;
-                box-shadow: 0 5px 12px rgba(0, 0, 0, 0.22) !important;
-            }}
-            div[data-testid="stButton"] > button.approve-art-btn:active,
-            div[data-testid="stButton"] > button.reject-art-btn:active {{
-                transform: translateY(2px) scale(0.985) !important;
-                filter: brightness(0.92) !important;
-                box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25) !important;
-            }}
-            div[data-testid="stButton"] > button.reject-art-btn *,
-            div[data-testid="stButton"] > button.reject-art-btn p,
-            div[data-testid="stButton"] > button.reject-art-btn span {{
-                color: #ffffff !important;
-                fill: #ffffff !important;
-            }}
-            </style>
-            <script>
-            (function () {{
-              const doc = window.parent && window.parent.document ? window.parent.document : document;
-              function applyApproveRejectStyles() {{
-                try {{
-                  const btns = doc.querySelectorAll('div[data-testid="stButton"] > button');
-                  btns.forEach((b) => {{
-                    const t = (b.innerText || "").trim();
-                    if (t.includes("승인")) {{
-                      b.classList.add("approve-art-btn");
-                      b.style.setProperty("background", "{approve_bg}", "important");
-                      b.style.setProperty("background-size", "cover", "important");
-                      b.style.setProperty("background-position", "center", "important");
-                      b.style.setProperty("background-repeat", "no-repeat", "important");
-                      b.style.setProperty("border", "none", "important");
-                      b.style.setProperty("box-shadow", "none", "important");
-                      b.style.setProperty("color", "#ffffff", "important");
-                      const hb = b.closest('div[data-testid="stHorizontalBlock"]');
-                      if (hb) {{
-                        hb.style.setProperty("display", "flex", "important");
-                        hb.style.setProperty("flex-direction", "row", "important");
-                        hb.style.setProperty("flex-wrap", "nowrap", "important");
-                        hb.style.setProperty("gap", "0.35rem", "important");
-                        Array.from(hb.children).forEach((c) => {{
-                          c.style.setProperty("width", "50%", "important");
-                          c.style.setProperty("max-width", "50%", "important");
-                          c.style.setProperty("min-width", "0", "important");
-                          c.style.setProperty("flex", "0 0 50%", "important");
-                        }});
-                      }}
-                    }}
-                    if (t.includes("거절")) {{
-                      b.classList.add("reject-art-btn");
-                      b.style.setProperty("background", "{reject_bg}", "important");
-                      b.style.setProperty("background-size", "cover", "important");
-                      b.style.setProperty("background-position", "center", "important");
-                      b.style.setProperty("background-repeat", "no-repeat", "important");
-                      b.style.setProperty("border", "none", "important");
-                      b.style.setProperty("box-shadow", "none", "important");
-                      b.style.setProperty("color", "#ffffff", "important");
-                      const hb = b.closest('div[data-testid="stHorizontalBlock"]');
-                      if (hb) {{
-                        hb.style.setProperty("display", "flex", "important");
-                        hb.style.setProperty("flex-direction", "row", "important");
-                        hb.style.setProperty("flex-wrap", "nowrap", "important");
-                        hb.style.setProperty("gap", "0.35rem", "important");
-                        Array.from(hb.children).forEach((c) => {{
-                          c.style.setProperty("width", "50%", "important");
-                          c.style.setProperty("max-width", "50%", "important");
-                          c.style.setProperty("min-width", "0", "important");
-                          c.style.setProperty("flex", "0 0 50%", "important");
-                        }});
-                      }}
-                    }}
-                  }});
-                }} catch (e) {{}}
-              }}
-              applyApproveRejectStyles();
-              setTimeout(applyApproveRejectStyles, 60);
-              setTimeout(applyApproveRejectStyles, 250);
-              setTimeout(applyApproveRejectStyles, 600);
-            }})();
-            </script>
-            """,
-            height=0,
-        )
-
-        h1, h2 = st.columns([2, 1], gap="small")
-        with h1:
-            st.markdown("### 승인 하기")
-        with h2:
-            if pending_count > 0:
-                if st.button("✅ 전체 승인", use_container_width=True, key="approve_all_pending"):
-                    ok, msg = approve_all_pending_requests(limit=200)
-                    if ok:
-                        st.success(msg)
-                    else:
-                        st.error(msg)
-                    st.rerun()
-        if pending_requests.empty:
-            st.info("승인 대기 요청이 없습니다.")
-        else:
-            for _, row in pending_requests.iterrows():
-                req_id = str(row.get("request_id", ""))
-                req_time = str(row.get("time", ""))
-                student_name = str(row.get("student_name", "원생"))
-                student_id = str(row.get("student_id", ""))
-                with st.container(border=True):
-                    st.markdown(f"**{student_name}** (`{student_id}`)")
-                    st.caption(f"요청: {req_time}")
-                    c_ok, c_no = st.columns(2, gap="small")
-                    with c_ok:
-                        if st.button("승인", key=f"approve_req_{req_id}", use_container_width=True):
-                            ok, msg = approve_attendance_request(req_id)
-                            if ok:
-                                st.success(msg)
-                            else:
-                                st.error(msg)
-                            st.rerun()
-                    with c_no:
-                        if st.button("거절", key=f"reject_req_{req_id}", use_container_width=True):
-                            ok, msg = reject_attendance_request(req_id)
-                            if ok:
-                                st.success(msg)
-                            else:
-                                st.error(msg)
-                            st.rerun()
-
-        st.markdown("### 최근 처리")
-        if recent_logs.empty:
-            st.caption("아직 처리 이력이 없습니다.")
-        else:
-            for _, row in recent_logs.iterrows():
-                with st.container(border=True):
-                    nm = str(row.get("student_name", "원생"))
-                    sid = str(row.get("student_id", ""))
-                    rem = str(row.get("remain_count", ""))
-                    ap = str(row.get("approved_time", "")) or str(row.get("time", ""))
-                    st.write(f"{nm} (`{sid}`) - 남은 {rem}회")
-                    st.caption(f"승인 시각: {ap}")
-
-        if not failed_log_requests.empty:
-            st.markdown("### 로그 저장 재시도")
-            for _, row in failed_log_requests.iterrows():
-                req_id = str(row.get("request_id", ""))
-                nm = str(row.get("student_name", "원생"))
-                sid = str(row.get("student_id", ""))
-                with st.container(border=True):
-                    st.write(f"{nm} (`{sid}`)")
-                    if st.button("로그 재시도", key=f"retry_log_{req_id}", use_container_width=True):
-                        ok, msg = retry_failed_log_request(req_id)
-                        if ok:
-                            st.success(msg)
-                            st.session_state["attendance_log_error"] = ""
-                        else:
-                            st.error(msg)
+    # 새로고침 진입 시 승인 대기가 있으면 상단 확인창 표시
+    if not st.session_state.get("owner_pending_prompt_closed", False):
+        pending_df = get_pending_attendance_requests(limit=500, force_refresh=False)
+        pending_count = 0 if pending_df is None else int(len(pending_df))
+        if pending_count > 0:
+            with st.container(border=True):
+                st.warning(f"승인 대기 {pending_count}건이 있습니다. 승인하러 가시겠습니까?")
+                p1, p2 = st.columns(2, gap="small")
+                with p1:
+                    if st.button("승인하러 가기", use_container_width=True, key="owner_pending_prompt_yes"):
+                        st.session_state["owner_menu_index"] = 1
+                        st.session_state["open_attendance_manager_once"] = True
+                        st.session_state["owner_pending_prompt_closed"] = True
+                        st.query_params["owner_menu_idx"] = "1"
+                        st.rerun()
+                with p2:
+                    if st.button("아니요", use_container_width=True, key="owner_pending_prompt_no"):
+                        st.session_state["owner_pending_prompt_closed"] = True
                         st.rerun()
 
-        if st.session_state.get("attendance_log_error"):
-            st.error(st.session_state["attendance_log_error"])
-            if st.button("로그 에러 닫기", key="dismiss_attendance_error"):
-                st.session_state["attendance_log_error"] = ""
-                st.rerun()
+    def render_dashboard_cards():
+        _t_cards = time.perf_counter()
+        perf_log("app.render_dashboard_cards", (time.perf_counter() - _t_cards) * 1000.0)
 
-        prev_pending_count = int(st.session_state.get("owner_prev_pending_count", 0))
-        if pending_count > prev_pending_count and pending_count > 0:
-            components.html(
-                """
-                <script>
-                    (function () {
-                        try {
-                            const Ctx = window.AudioContext || window.webkitAudioContext;
-                            if (!Ctx) return;
-                            const ctx = new Ctx();
-                            const osc = ctx.createOscillator();
-                            const gain = ctx.createGain();
-                            osc.type = "sine";
-                            osc.frequency.value = 880;
-                            gain.gain.value = 0.08;
-                            osc.connect(gain);
-                            gain.connect(ctx.destination);
-                            osc.start();
-                            setTimeout(() => { osc.stop(); ctx.close(); }, 180);
-                        } catch (e) {}
-                    })();
-                </script>
-                """,
-                height=0,
-            )
-        st.session_state["owner_prev_pending_count"] = pending_count
-
-    # 모바일에서 2열 → 세로 스택(CSS :has + 아래 JS). 앵커 바로 다음 형제가 메인 stHorizontalBlock 래퍼.
-    st.markdown(
-        '<span class="owner-main-split-anchor" aria-hidden="true"></span>',
-        unsafe_allow_html=True,
-    )
-
-    left_col, right_col = st.columns([1, 1], gap="large")
-
-    # 버튼이 이 블록 안에서 session_state를 갱신하므로, 오른쪽 패널용 인덱스는 왼쪽(메뉴) 실행 *이후*에 읽어야 함.
-    # 그렇지 않으면 한 번 클릭 늦게(다음 클릭 때 이전 선택이) 반영되는 것처럼 보임.
-    with left_col:
-        with st.expander("운영 대시보드", expanded=True):
-            render_owner_menu_grid(
-                st.session_state.get("owner_login_at", ""),
-                active_idx=int(st.session_state.get("owner_menu_index", 0)),
-            )
-            # 메뉴 전환 때 카드를 건너뛰면 왼쪽 패널이 비어 보이고, 다음 리런까지 공백이 남을 수 있음
-            if hasattr(st, "fragment"):
-                @st.fragment(run_every="120s")
-                def auto_refresh_owner_cards():
-                    render_dashboard_cards()
-
-                auto_refresh_owner_cards()
-            else:
+    # 주메뉴/본문은 항상 1열 고정 (분할 레이아웃 제거)
+    with st.expander("메뉴", expanded=True):
+        render_owner_menu_grid(
+            st.session_state.get("owner_login_at", ""),
+            active_idx=int(st.session_state.get("owner_menu_index", 0)),
+        )
+        if hasattr(st, "fragment"):
+            @st.fragment(run_every="120s")
+            def auto_refresh_owner_cards():
                 render_dashboard_cards()
+
+            auto_refresh_owner_cards()
+        else:
+            render_dashboard_cards()
 
     selected_idx = int(st.session_state.get("owner_menu_index", 0))
     if selected_idx < 0 or selected_idx > 3:
         selected_idx = 0
     st.query_params["owner_menu_idx"] = str(selected_idx)
 
-    with right_col:
-        with st.container(border=True):
-            if selected_idx == 0:
-                from core.marketer import run_marketing_ui
+    with st.container(border=True):
+        if selected_idx == 0:
+            from core.marketer import run_marketing_ui
 
-                run_marketing_ui()
-            elif selected_idx == 1:
-                run_student_ui()
-            elif selected_idx == 2:
-                from core.finance import run_finance_ui
+            run_marketing_ui()
+        elif selected_idx == 1:
+            run_student_ui()
+        elif selected_idx == 2:
+            from core.finance import run_finance_ui
 
-                run_finance_ui()
-            elif selected_idx == 3:
-                from core.curriculum import run_curriculum_ui
+            run_finance_ui()
+        elif selected_idx == 3:
+            from core.curriculum import run_curriculum_ui
 
-                run_curriculum_ui()
-
-    # 두 열 아래에 두어 2열 레이아웃이 깨지지 않게 함
-    components.html(
-        f"""
-        <script>
-            (function () {{
-                let startX = null;
-                const currentIdx = {selected_idx};
-                const maxIdx = 3;
-                function updateIdx(nextIdx) {{
-                    const url = new URL(window.parent.location.href);
-                    url.searchParams.set("owner_menu_idx", String(nextIdx));
-                    window.parent.location.href = url.toString();
-                }}
-                window.addEventListener("touchstart", function(e) {{
-                    if (e.touches && e.touches.length > 0) startX = e.touches[0].clientX;
-                }}, {{ passive: true }});
-                window.addEventListener("touchend", function(e) {{
-                    if (startX === null) return;
-                    const endX = (e.changedTouches && e.changedTouches.length > 0) ? e.changedTouches[0].clientX : startX;
-                    const delta = endX - startX;
-                    if (delta < -60 && currentIdx < maxIdx) updateIdx(currentIdx + 1);   // left swipe
-                    if (delta > 60 && currentIdx > 0) updateIdx(currentIdx - 1);         // right swipe
-                    startX = null;
-                }}, {{ passive: true }});
-
-                function findOwnerMainHorizontal(doc) {{
-                    const anchor = doc.querySelector("span.owner-main-split-anchor");
-                    if (!anchor) return null;
-                    const ec = anchor.closest('[data-testid="stElementContainer"]');
-                    if (!ec || !ec.nextElementSibling) return null;
-                    return ec.nextElementSibling.querySelector('[data-testid="stHorizontalBlock"]');
-                }}
-                function ownerMainSplitApply() {{
-                    let doc = document;
-                    let win = window;
-                    try {{
-                        if (window.parent && window.parent.document) {{
-                            const pdoc = window.parent.document;
-                            if (pdoc.querySelector("span.owner-main-split-anchor")) {{
-                                doc = pdoc;
-                                win = window.parent;
-                            }}
-                        }}
-                    }} catch (e) {{}}
-                    const hb = findOwnerMainHorizontal(doc);
-                    if (!hb) return;
-                    const narrow = win.innerWidth <= 760;
-                    hb.style.flexDirection = narrow ? "column" : "row";
-                    hb.style.alignItems = narrow ? "stretch" : "";
-                    const gap = narrow ? "0.75rem" : "";
-                    hb.style.gap = gap;
-                    const kids = hb.children;
-                    for (let i = 0; i < kids.length; i++) {{
-                        const c = kids[i];
-                        if (narrow) {{
-                            c.style.width = "100%";
-                            c.style.maxWidth = "100%";
-                            c.style.minWidth = "0";
-                            c.style.flex = "1 1 auto";
-                        }} else {{
-                            c.style.width = "";
-                            c.style.maxWidth = "";
-                            c.style.minWidth = "";
-                            c.style.flex = "";
-                        }}
-                    }}
-                }}
-                ownerMainSplitApply();
-                try {{
-                    (window.parent || window).addEventListener("resize", ownerMainSplitApply);
-                }} catch (e) {{
-                    window.addEventListener("resize", ownerMainSplitApply);
-                }}
-            }})();
-        </script>
-        """,
-        height=0,
-    )
+            run_curriculum_ui()
 
     st.markdown("<br><br>", unsafe_allow_html=True)
     if st.button("로그아웃", use_container_width=True, key="owner_logout_bottom"):
         st.session_state["owner_authenticated"] = False
+        st.session_state["owner_auth_method"] = ""
         st.session_state["entry_mode"] = None
         st.session_state["intro_done"] = False
         st.session_state["owner_login_at"] = ""
@@ -908,18 +619,52 @@ def render_owner_menu():
         st.query_params.pop("skip_intro", None)
         st.rerun()
     st.caption("Developed by 엔지니어 남편 v1.5")
+    perf_log("app.render_owner_menu", (time.perf_counter() - _t_owner) * 1000.0)
 
 
 if st.session_state.get('intro_done'):
     init_entry_state()
     sync_owner_session_from_query()
+    # F5 복원: owner 모드 + Google 세션 유효하면 원장 세션을 먼저 복구
+    try:
+        if (
+            str(st.query_params.get("mode", "")) == "owner"
+            and drive_oauth.oauth_google_drive_configured()
+            and drive_oauth.has_valid_session_credentials()
+            and not st.session_state.get("owner_authenticated")
+        ):
+            st.session_state["owner_authenticated"] = True
+            st.session_state["owner_auth_method"] = "google"
+            if not st.session_state.get("owner_login_at"):
+                st.session_state["owner_login_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            st.query_params["owner_login_at"] = st.session_state["owner_login_at"]
+    except Exception:
+        pass
     # 원장 세션 1시간 만료 처리
-    if st.session_state.get("owner_authenticated") and not is_owner_session_valid():
+    if (
+        st.session_state.get("owner_authenticated")
+        and st.session_state.get("owner_auth_method") != "google"
+        and not is_owner_session_valid()
+    ):
         st.session_state["owner_authenticated"] = False
+        st.session_state["owner_auth_method"] = ""
         st.session_state["owner_login_at"] = ""
         st.query_params.pop("owner_login_at", None)
         if st.session_state.get("entry_mode") == "owner":
             st.warning("원장 로그인 유지 시간이 만료되었습니다. 다시 로그인해주세요.")
+    # Google 기반 원장 인증: OAuth 세션이 끊기면 다시 로그인
+    if (
+        st.session_state.get("owner_authenticated")
+        and st.session_state.get("owner_auth_method") == "google"
+        and drive_oauth.oauth_google_drive_configured()
+        and not drive_oauth.has_valid_session_credentials()
+    ):
+        st.session_state["owner_authenticated"] = False
+        st.session_state["owner_auth_method"] = ""
+        st.session_state["owner_login_at"] = ""
+        st.query_params.pop("owner_login_at", None)
+        if st.session_state.get("entry_mode") == "owner":
+            st.warning("Google 로그인 세션이 만료되었습니다. 다시 로그인해주세요.")
 
     mode = st.session_state.get("entry_mode")
     if mode is None:
@@ -937,21 +682,13 @@ if st.session_state.get('intro_done'):
 # --- 4. 푸터 ---
 if st.session_state.get('intro_done'):
     st.markdown("---")
-    fc1, fc2 = st.columns([3, 1], vertical_alignment="center")
-    with fc1:
-        st.caption("© 2026 작업실 그리다가. All rights reserved.")
-    with fc2:
-        _gd_connected = drive_oauth.has_valid_session_credentials()
-        if st.button(
-            "백업하기",
-            key="manual_sheet_backup",
-            help="스프레드시트 전체 → Drive에 .json.gz 저장. 마케팅에서 Google 드라이브 연결 후 사용.",
-            disabled=not _gd_connected,
-        ):
-            from core.sheet_backup import run_sheet_backup_now
+    st.caption("© 2026 작업실 그리다가. All rights reserved.")
 
-            ok, msg = run_sheet_backup_now()
-            if ok:
-                st.success(f"백업 완료: `{msg}`")
+    if perf_enabled():
+        with st.expander("⚡ 성능 로그(상위 10)"):
+            top = perf_recent_top(10)
+            if top:
+                for i, row in enumerate(top, start=1):
+                    st.caption(f"{i}. {row['label']} - {row['ms']:.1f}ms")
             else:
-                st.error(f"백업 실패: {msg}")
+                st.caption("아직 수집된 로그가 없습니다.")

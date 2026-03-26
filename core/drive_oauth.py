@@ -32,6 +32,8 @@ from google_auth_oauthlib.flow import Flow
 
 _CREDS_KEY = "_google_drive_oauth_creds"
 _DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
+# 세션이 재생성(F5)되어도 같은 앱 프로세스 내에서는 OAuth 자격증명을 복원
+_PROCESS_OAUTH_CREDS: dict | None = None
 # google_auth_oauthlib Flow와 동일한 PKCE 문자 집합 (RFC 7636)
 _PKCE_CHARS = ascii_letters + digits + "-._~"
 
@@ -141,14 +143,18 @@ def _creds_to_dict(creds: Credentials) -> dict:
 
 
 def has_valid_session_credentials() -> bool:
-    d = st.session_state.get(_CREDS_KEY)
+    d = st.session_state.get(_CREDS_KEY) or _PROCESS_OAUTH_CREDS
     if not d:
         return False
     return bool(d.get("refresh_token") or d.get("token"))
 
 
 def get_session_credentials() -> Credentials | None:
+    global _PROCESS_OAUTH_CREDS
     d = st.session_state.get(_CREDS_KEY)
+    if not d and _PROCESS_OAUTH_CREDS:
+        d = dict(_PROCESS_OAUTH_CREDS)
+        st.session_state[_CREDS_KEY] = d
     if not d:
         return None
     try:
@@ -163,13 +169,16 @@ def get_session_credentials() -> Credentials | None:
         if creds.expired and creds.refresh_token:
             creds.refresh(Request())
             st.session_state[_CREDS_KEY] = _creds_to_dict(creds)
+            _PROCESS_OAUTH_CREDS = dict(st.session_state[_CREDS_KEY])
         return creds
     except Exception:
         return None
 
 
 def disconnect_google_drive_oauth():
+    global _PROCESS_OAUTH_CREDS
     st.session_state.pop(_CREDS_KEY, None)
+    _PROCESS_OAUTH_CREDS = None
 
 
 def build_google_drive_authorization_url(cfg: dict) -> str:
@@ -180,6 +189,8 @@ def build_google_drive_authorization_url(cfg: dict) -> str:
         "n": secrets.token_hex(8),
         "cv": cv,
     }
+    if st.session_state.get("entry_mode") == "owner":
+        pl["om"] = "owner"  # 원장 로그인 의도 보존(최초 로그인에도 필요)
     if st.session_state.get("owner_login_at") and st.session_state.get("entry_mode") == "owner":
         pl["ola"] = str(st.session_state["owner_login_at"])
         pl["omi"] = int(st.session_state.get("owner_menu_index", 0))
@@ -209,6 +220,8 @@ def _oauth_strip_callback_params():
 def _apply_oauth_return_navigation(payload: dict):
     """구글 리다이렉트 후 세션이 비어도 원장·마케팅으로 돌아가게 복원."""
     ola = payload.get("ola")
+    if payload.get("om") == "owner":
+        st.session_state["entry_mode"] = "owner"
     if ola:
         st.session_state["entry_mode"] = "owner"
         st.session_state["owner_login_at"] = str(ola)
@@ -219,6 +232,7 @@ def _apply_oauth_return_navigation(payload: dict):
 
 def try_finish_google_drive_oauth():
     """앱 진입 시 호출: ?code=&state= 이 있으면 토큰 교환 후 쿼리 정리·rerun."""
+    global _PROCESS_OAUTH_CREDS
     cfg = _load_oauth_secrets()
     if not cfg:
         return
@@ -248,6 +262,7 @@ def try_finish_google_drive_oauth():
         flow = _build_flow(cfg, code_verifier=payload["cv"], autogenerate_code_verifier=False)
         flow.fetch_token(code=code)
         st.session_state[_CREDS_KEY] = _creds_to_dict(flow.credentials)
+        _PROCESS_OAUTH_CREDS = dict(st.session_state[_CREDS_KEY])
         st.session_state["_oauth_drive_ok"] = True
         _apply_oauth_return_navigation(payload)
     except Exception as e:

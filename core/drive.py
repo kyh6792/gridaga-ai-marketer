@@ -110,7 +110,7 @@ def upload_bytes_to_drive(
         file = service.files().create(
             body=body,
             media_body=media,
-            fields="id, webViewLink",
+            fields="id, name, webViewLink",
             supportsAllDrives=True,
             ignoreDefaultVisibility=True,
         ).execute()
@@ -123,7 +123,24 @@ def upload_bytes_to_drive(
                 ).execute()
             except Exception:
                 pass
-        return {"id": file.get("id"), "link": file.get("webViewLink")}
+        file_id = file.get("id")
+        if not file_id:
+            return None
+        file_name = file.get("name") or file_name
+        link = file.get("webViewLink")
+        if not link:
+            # 공유드라이브/권한 환경에서 webViewLink가 비어 있을 수 있어 보강 조회
+            try:
+                meta = service.files().get(
+                    fileId=file_id,
+                    fields="id, name, webViewLink",
+                    supportsAllDrives=True,
+                ).execute()
+                link = meta.get("webViewLink") or link
+                file_name = meta.get("name") or file_name
+            except Exception:
+                pass
+        return {"id": file_id, "name": file_name, "link": link}
     except Exception:
         return None
 

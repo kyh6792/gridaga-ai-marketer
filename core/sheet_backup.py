@@ -143,9 +143,12 @@ def _perform_sheet_backup(
                     "마케팅에서 Google 연결 후 다시 시도하거나, 공유 드라이브의 `folder_id`를 쓰세요.",
                 )
             return False, "Drive 업로드 실패(`folder_id`가 본인 드라이브 안 폴더인지 확인)"
+        if not up.get("id"):
+            return False, "Drive 업로드 응답이 비정상입니다. (file id 없음)"
         if update_meta:
             _write_backup_meta(conn, sheet_url, today)
-        return True, fname
+        shown_name = str(up.get("name") or fname)
+        return True, shown_name
     except Exception as e:
         return False, str(e)
 

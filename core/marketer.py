@@ -6,6 +6,7 @@ import io
 import json
 import re
 import os
+import time
 from datetime import datetime
 from urllib.error import URLError, HTTPError
 from urllib.request import Request, urlopen
@@ -15,17 +16,18 @@ from core.database import load_prompts_from_sheet, save_prompt_to_sheet, get_con
 from core.config import DEFAULT_PROMPTS, API_MODEL
 from core import drive_oauth
 from core.drive import display_drive_selector, get_drive_folder_id, upload_image_to_drive, upload_bytes_to_drive
+from core.perf import perf_log
 
 
 def _render_copy_text_box(label: str, text: str, key: str):
     """코드블록 대신 줄바꿈되는 문구 박스."""
     t = str(text or "")
-    line_count = max(4, min(16, len(t.splitlines()) + 2))
+    line_count = max(3, min(10, len(t.splitlines()) + 1))
     st.text_area(
         label,
         value=t,
         key=key,
-        height=24 * line_count + 20,
+        height=22 * line_count + 8,
         help="내용 선택 후 복사해서 사용하세요.",
     )
 
@@ -58,7 +60,7 @@ def run_marketing_ui():
         default="✨ 문구 생성",
         label_visibility="collapsed",
     )
-    st.markdown("---")
+    st.markdown("<div style='height:4px;'></div>", unsafe_allow_html=True)
 
     # [📜 히스토리 모드]
     if menu == "📜 히스토리":
@@ -75,38 +77,64 @@ def run_marketing_ui():
     # 2. 사진 업로드 영역 (카드형 레이아웃)
     with st.container(border=True):
         img_source = st.toggle("☁️ 구글 드라이브 사용", value=False)
-        input_image = None
+        input_images = []
         final_image_link = ""
         auto_upload_after_generate = False
-        original_upload = None
+        original_uploads = []
 
         if not img_source:
             has_folder = bool(get_drive_folder_id())
             oauth_on = drive_oauth.oauth_google_drive_configured()
             oauth_ok = drive_oauth.has_valid_session_credentials() if oauth_on else True
 
-            # 업로드 전에 연결 상태를 먼저 확인할 수 있게 상단에 배치
-            if oauth_on:
-                st.caption("먼저 Google 드라이브 연결 상태를 확인하세요.")
-                drive_oauth.render_google_drive_oauth_panel()
-                oauth_ok = drive_oauth.has_valid_session_credentials()
-                if not oauth_ok:
-                    st.info("먼저 **연결**을 완료하면, 이미지 업로드 후 다시 불러올 필요가 줄어듭니다.")
+            if oauth_on and not oauth_ok:
+                st.info("Google 로그인 세션이 필요합니다. 원장 인증에서 다시 로그인해 주세요.")
 
-            uploaded_file = st.file_uploader("📷 사진을 선택하세요", type=['jpg', 'jpeg', 'png'])
-            if uploaded_file:
-                original_upload = {
-                    "bytes": uploaded_file.getvalue(),
-                    "name": str(getattr(uploaded_file, "name", "") or "").strip(),
-                    "mime_type": str(getattr(uploaded_file, "type", "") or "").strip() or "application/octet-stream",
-                }
-                # 휴대폰 사진 EXIF 방향값 반영 (회전/뒤집힘 방지)
-                input_image = ImageOps.exif_transpose(Image.open(uploaded_file))
-                st.image(input_image, use_container_width=True)
+            uploaded_files = st.file_uploader(
+                "📷 사진을 선택하세요 (최대 5장)",
+                type=['jpg', 'jpeg', 'png'],
+                accept_multiple_files=True,
+            )
+            if uploaded_files:
+                picked = uploaded_files[:5]
+                if len(uploaded_files) > 5:
+                    st.warning("최대 5장만 사용됩니다.")
+                for uf in picked:
+                    original_uploads.append({
+                        "bytes": uf.getvalue(),
+                        "name": str(getattr(uf, "name", "") or "").strip(),
+                        "mime_type": str(getattr(uf, "type", "") or "").strip() or "application/octet-stream",
+                    })
+                    # 휴대폰 사진 EXIF 방향값 반영 (회전/뒤집힘 방지)
+                    input_images.append(ImageOps.exif_transpose(Image.open(uf)))
+                if len(input_images) == 1:
+                    st.image(input_images[0], use_container_width=True)
+                else:
+                    idx_key = "mk_preview_idx"
+                    cur = int(st.session_state.get(idx_key, 0))
+                    if cur < 0 or cur >= len(input_images):
+                        cur = 0
+                    st.session_state[idx_key] = cur
+
+                    st.image(input_images[cur], use_container_width=True)
+                    c_prev, c_mid, c_next = st.columns([1, 2, 1], gap="small")
+                    with c_prev:
+                        if st.button("◀", key="mk_prev_img", use_container_width=True):
+                            st.session_state[idx_key] = (cur - 1) % len(input_images)
+                            st.rerun()
+                    with c_mid:
+                        st.markdown(
+                            f"<div style='text-align:center;font-weight:600;'>{cur + 1} / {len(input_images)}</div>",
+                            unsafe_allow_html=True,
+                        )
+                    with c_next:
+                        if st.button("▶", key="mk_next_img", use_container_width=True):
+                            st.session_state[idx_key] = (cur + 1) % len(input_images)
+                            st.rerun()
                 can_upload = has_folder and oauth_ok if oauth_on else has_folder
                 default_on = bool(can_upload and (oauth_ok if oauth_on else has_folder))
                 auto_upload_after_generate = st.checkbox(
-                    "문구 생성 후 이 사진을 구글 드라이브에 자동 업로드",
+                    "문구 생성 후 이 사진들(최대 5장)을 구글 드라이브에 자동 업로드",
                     value=default_on,
                     disabled=not can_upload,
                     help="생성 직후 지정 폴더에 사진 업로드. OAuth면 옆 **연결**, 아니면 서비스 계정.",
@@ -114,10 +142,12 @@ def run_marketing_ui():
                 if not has_folder:
                     st.caption("secrets에 `folder_id` 필요")
                 elif oauth_on and not oauth_ok:
-                    st.caption("자동 업로드 쓰려면 옆 **연결**")
+                    st.caption("자동 업로드를 쓰려면 원장 Google 로그인이 활성 상태여야 합니다.")
         else:
             # 드라이브 로직 (간소화)
             input_image, final_image_link = display_drive_selector() # 함수화 추천
+            if input_image is not None:
+                input_images = [input_image]
 
     # 3. 요청 사항 (익스팬더로 숨겨서 깔끔하게)
     with st.expander("📝 특별 요청 또는 스타일 수정"):
@@ -128,7 +158,7 @@ def run_marketing_ui():
             st.success("저장 완료!")
 
     # 4. 생성할 문구 범위 + 생성 버튼
-    if input_image:
+    if input_images:
         category = st.pills(
             "📍 어떤 사진인가요?",
             category_options,
@@ -144,19 +174,19 @@ def run_marketing_ui():
         if st.button("🚀 마케팅 문구 만들기", type="primary", use_container_width=True):
             mode = {"둘 다": "both", "인스타만": "instagram", "블로그만": "blog"}[output_choice]
             process_and_display_results(
-                input_image,
+                input_images,
                 category,
                 editable_instruction,
                 special_request,
                 final_image_link,
                 auto_upload_after_generate=auto_upload_after_generate,
                 output_mode=mode,
-                original_upload=original_upload,
+                original_uploads=original_uploads,
             )
 
 # --- 내부 보조 함수 (가독성을 위해 분리) ---
 def process_and_display_results(
-    image,
+    images,
     cat,
     instruction,
     request,
@@ -164,9 +194,10 @@ def process_and_display_results(
     *,
     auto_upload_after_generate=False,
     output_mode: str = "both",
-    original_upload: dict | None = None,
+    original_uploads: list[dict] | None = None,
 ):
     """output_mode: both | instagram | blog"""
+    _t0 = time.perf_counter()
     with st.status("🎨 AI가 작성 중...", expanded=False):
         try:
             api_key = ""
@@ -176,6 +207,7 @@ def process_and_display_results(
                 api_key = str(st.secrets["gemini"]["api_key"])
             if not api_key:
                 st.error("GEMINI_API_KEY가 설정되지 않았습니다.")
+                perf_log("marketer.process_and_display_results", (time.perf_counter() - _t0) * 1000.0)
                 return
 
             if output_mode == "both":
@@ -200,11 +232,12 @@ def process_and_display_results(
             client = genai.Client(api_key=api_key)
             response = client.models.generate_content(
                 model=API_MODEL,
-                contents=[prompt, image]
+                contents=[prompt, *images]
             )
             raw_text = (response.text or "").strip()
             if not raw_text:
                 st.error("AI 응답이 비어 있습니다. 잠시 후 다시 시도해주세요.")
+                perf_log("marketer.process_and_display_results", (time.perf_counter() - _t0) * 1000.0)
                 return
 
             res_data = _parse_marketing_json(raw_text)
@@ -213,19 +246,23 @@ def process_and_display_results(
             if output_mode == "both":
                 if not insta_text or not blog_text:
                     st.error("AI 응답 형식이 올바르지 않습니다. 다시 시도해주세요.")
+                    perf_log("marketer.process_and_display_results", (time.perf_counter() - _t0) * 1000.0)
                     return
             elif output_mode == "instagram":
                 if not insta_text:
                     st.error("인스타 문구를 받지 못했습니다. 다시 시도해주세요.")
+                    perf_log("marketer.process_and_display_results", (time.perf_counter() - _t0) * 1000.0)
                     return
                 blog_text = ""
             else:
                 if not blog_text:
                     st.error("블로그 문구를 받지 못했습니다. 다시 시도해주세요.")
+                    perf_log("marketer.process_and_display_results", (time.perf_counter() - _t0) * 1000.0)
                     return
                 insta_text = ""
         except Exception as e:
             st.error(f"AI 생성 중 오류: {e}")
+            perf_log("marketer.process_and_display_results", (time.perf_counter() - _t0) * 1000.0)
             return
 
     final_link = (link or "").strip()
@@ -237,34 +274,36 @@ def process_and_display_results(
             if use_oauth and user_creds is None:
                 st.warning("드라이브 연결 안 됨 — 업로드 생략")
             else:
+                uploaded_links = []
                 with st.spinner("☁️ 드라이브에 원본 사진 저장 중..."):
-                    if original_upload and original_upload.get("bytes"):
-                        original_name = str(original_upload.get("name", "")).strip()
-                        if not original_name:
-                            original_name = f"upload_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
-                        up = upload_bytes_to_drive(
-                            data=original_upload.get("bytes", b""),
-                            file_name=original_name,
-                            folder_id=folder_id,
-                            mime_type=str(original_upload.get("mime_type", "") or "application/octet-stream"),
-                            add_anyone_reader=True,
-                            user_credentials=user_creds if use_oauth else None,
-                        )
+                    if original_uploads:
+                        for idx, up_item in enumerate(original_uploads, start=1):
+                            original_name = str(up_item.get("name", "")).strip()
+                            if not original_name:
+                                original_name = f"upload_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{idx}.jpg"
+                            up = upload_bytes_to_drive(
+                                data=up_item.get("bytes", b""),
+                                file_name=original_name,
+                                folder_id=folder_id,
+                                mime_type=str(up_item.get("mime_type", "") or "application/octet-stream"),
+                                add_anyone_reader=True,
+                                user_credentials=user_creds if use_oauth else None,
+                            )
+                            if up and up.get("link"):
+                                uploaded_links.append(str(up["link"]).strip())
                     else:
                         # 드라이브에서 고른 이미지 등 원본 bytes가 없을 때만 기존 JPG 변환 업로드 사용
                         up = upload_image_to_drive(
-                            image,
+                            images[0],
                             folder_id,
                             cat,
                             user_credentials=user_creds if use_oauth else None,
                         )
-                if up and up.get("link"):
-                    final_link = str(up["link"]).strip()
-                    st.caption(f"드라이브에 저장됨: {final_link}")
-                elif up and up.get("id"):
-                    st.caption(
-                        "드라이브에는 올라갔으나 웹 링크를 가져오지 못했습니다. 드라이브에서 파일을 확인하세요."
-                    )
+                        if up and up.get("link"):
+                            uploaded_links.append(str(up["link"]).strip())
+                if uploaded_links:
+                    final_link = uploaded_links[0]
+                    st.caption(f"드라이브에 저장됨: {len(uploaded_links)}장")
     
     st.success("✅ 완성되었습니다!")
     render_key = datetime.now().strftime("%Y%m%d%H%M%S%f")
@@ -298,6 +337,7 @@ def process_and_display_results(
     saved = save_to_history(cat, insta_text, blog_text, final_link)
     if saved:
         st.caption("히스토리에 저장되었습니다.")
+    perf_log("marketer.process_and_display_results", (time.perf_counter() - _t0) * 1000.0)
 
 
 def _parse_marketing_json(text):

@@ -798,7 +798,13 @@ def apply_owner_dashboard_style():
 def render_owner_brand_header():
     st.markdown(
         """
-        <div class='sticky-owner-header full-bleed'>
+        <div id='owner-brand-refresh-target' class='sticky-owner-header full-bleed'
+             role='button'
+             tabindex='0'
+             title='새로고침'
+             style='cursor:pointer;'
+             onclick='try{(window.parent||window).location.reload();}catch(e){window.location.reload();}'
+             onkeydown='if(event.key==="Enter"||event.key===" "){event.preventDefault();try{(window.parent||window).location.reload();}catch(e){window.location.reload();}}'>
             <div class='header-inner'>
                 <div class='header-left'>
                     <div class='wood-kicker'>STUDIO</div>
@@ -816,13 +822,54 @@ def render_owner_brand_header():
         """,
         unsafe_allow_html=True,
     )
+    components.html(
+        """
+        <script>
+        (function () {
+          const doc = (window.parent && window.parent.document) ? window.parent.document : document;
+          const win = (window.parent && window.parent.location) ? window.parent : window;
+          function hardRefresh() {
+            try {
+              const u = new URL(win.location.href);
+              u.searchParams.set("_rf", String(Date.now()));
+              win.location.href = u.toString();
+            } catch (e) {
+              try { win.location.reload(); } catch (_) {}
+            }
+          }
+          function bind() {
+            try {
+              const el = doc.querySelector("#owner-brand-refresh-target");
+              if (!el) return;
+              if (el.dataset.refreshBound === "1") return;
+              el.dataset.refreshBound = "1";
+              el.addEventListener("click", function (e) {
+                e.preventDefault();
+                hardRefresh();
+              }, true);
+              el.addEventListener("keydown", function (e) {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  hardRefresh();
+                }
+              }, true);
+            } catch (e) {}
+          }
+          bind();
+          setTimeout(bind, 80);
+          setTimeout(bind, 300);
+        })();
+        </script>
+        """,
+        height=0,
+    )
 
 
 def render_owner_menu_grid(owner_login_at, active_idx=None):
     del owner_login_at  # 버튼 기반 전환으로 링크 쿼리 조합은 사용하지 않음.
     items = [
         ("📢 마케팅", 0),
-        ("👥 원생관리", 1),
+        ("👥 회원관리", 1),
         ("💰 재무", 2),
         ("📚 커리큘럼", 3),
     ]
@@ -851,7 +898,7 @@ def render_owner_menu_grid(owner_login_at, active_idx=None):
 
     bg_map = {
         "마케팅": _asset_css_bg("butten1.png", "linear-gradient(120deg, #C09066 0%, #B47F57 55%, #A86E48 100%)"),
-        "원생관리": _asset_css_bg("butten2.png", "linear-gradient(120deg, #C09066 0%, #B47F57 55%, #A86E48 100%)"),
+        "회원관리": _asset_css_bg("butten2.png", "linear-gradient(120deg, #C09066 0%, #B47F57 55%, #A86E48 100%)"),
         "재무": _asset_css_bg("butten3.png", "linear-gradient(120deg, #C09066 0%, #B47F57 55%, #A86E48 100%)"),
         "커리큘럼": _asset_css_bg("butten4.png", "linear-gradient(120deg, #C09066 0%, #B47F57 55%, #A86E48 100%)"),
         "로그아웃": _asset_css_bg("logout.png", "linear-gradient(120deg, #9E6B43 0%, #8E5F3D 58%, #7E5233 100%)"),
@@ -882,10 +929,32 @@ def render_owner_menu_grid(owner_login_at, active_idx=None):
               btns.forEach((b) => {
                 const t = (b.innerText || "").trim();
                 if (t.includes("마케팅")) applyBg(b, bgMap["마케팅"]);
-                if (t.includes("원생관리")) applyBg(b, bgMap["원생관리"]);
+                if (t.includes("회원관리")) applyBg(b, bgMap["회원관리"]);
                 if (t.includes("재무")) applyBg(b, bgMap["재무"]);
                 if (t.includes("커리큘럼")) applyBg(b, bgMap["커리큘럼"]);
                 if (t.includes("로그아웃")) applyBg(b, bgMap["로그아웃"]);
+              });
+
+              // 상단 4메뉴(2행) 모바일 자동 스택 방지: 항상 2x2 유지
+              const rows = doc.querySelectorAll('div[data-testid="stHorizontalBlock"]');
+              rows.forEach((hb) => {
+                const btns = hb.querySelectorAll('div[data-testid="stButton"] > button');
+                if (!btns || btns.length < 2) return;
+                const texts = Array.from(btns).map((b) => (b.innerText || "").trim());
+                const isMenuRow =
+                  (texts.some((t) => t.includes("마케팅")) && texts.some((t) => t.includes("회원관리"))) ||
+                  (texts.some((t) => t.includes("재무")) && texts.some((t) => t.includes("커리큘럼")));
+                if (!isMenuRow) return;
+                hb.style.setProperty("display", "flex", "important");
+                hb.style.setProperty("flex-direction", "row", "important");
+                hb.style.setProperty("flex-wrap", "nowrap", "important");
+                hb.style.setProperty("gap", "0.5rem", "important");
+                Array.from(hb.children).forEach((c) => {
+                  c.style.setProperty("width", "50%", "important");
+                  c.style.setProperty("max-width", "50%", "important");
+                  c.style.setProperty("min-width", "0", "important");
+                  c.style.setProperty("flex", "0 0 50%", "important");
+                });
               });
             } catch (e) {}
           }

@@ -3,10 +3,12 @@ import pandas as pd
 from datetime import datetime
 import time
 from core.database import get_conn
+from core.perf import perf_log
 
 
 WORKSHEET_NAME = "student_schedule"
 BASE_COLUMNS = ["id", "student_id", "student_name", "weekday", "time_slot", "start_date", "end_date", "memo", "created_at"]
+_SCHEDULE_NEXT_READ_FRESH = "_schedule_next_read_fresh"
 WEEKDAY_ORDER = ["월", "화", "수", "목", "금", "토", "일"]
 TIME_SLOTS_BY_WEEKDAY = {
     "월": ["10:30~13:00", "14:30~17:00", "18:30~21:00"],
@@ -18,6 +20,15 @@ TIME_SLOTS_BY_WEEKDAY = {
     "일": ["자유드로잉"],
 }
 MAX_STUDENTS_PER_SLOT = 4
+
+
+def _mark_schedule_dirty():
+    """시간표 쓰기 직후 다음 조회 1회는 ttl 캐시를 우회."""
+    st.session_state[_SCHEDULE_NEXT_READ_FRESH] = True
+
+
+def _schedule_read_ttl(default_ttl=60):
+    return 0 if st.session_state.pop(_SCHEDULE_NEXT_READ_FRESH, False) else default_ttl
 
 
 def _safe_read(conn, worksheet, ttl=0, retries=2):
@@ -53,14 +64,14 @@ def _safe_update(conn, worksheet, data, retries=2):
     raise last_error
 
 
-def _read_or_init_schedule():
+def _read_or_init_schedule(ttl=60):
     conn = get_conn()
     try:
-        df = _safe_read(conn, worksheet=WORKSHEET_NAME, ttl=60)
+        df = _safe_read(conn, worksheet=WORKSHEET_NAME, ttl=ttl)
     except Exception:
         df = pd.DataFrame(columns=BASE_COLUMNS)
         _safe_update(conn, worksheet=WORKSHEET_NAME, data=df)
-        df = _safe_read(conn, worksheet=WORKSHEET_NAME, ttl=60)
+        df = _safe_read(conn, worksheet=WORKSHEET_NAME, ttl=ttl)
 
     if df is None or df.empty:
         df = pd.DataFrame(columns=BASE_COLUMNS)
@@ -103,7 +114,7 @@ def _weekday_to_kor(weekday_idx):
 
 def get_today_schedule_by_student(student_id):
     """원생용 화면에서 오늘 일정 조회"""
-    _, df = _read_or_init_schedule()
+    _, df = _read_or_init_schedule(ttl=_schedule_read_ttl())
     if df.empty:
         return pd.DataFrame(columns=BASE_COLUMNS)
 
@@ -120,8 +131,9 @@ def get_today_schedule_by_student(student_id):
 
 
 def run_schedule_ui(simple_mode=False):
+    _t0 = time.perf_counter()
     st.subheader("🗓 원생 시간표")
-    conn, df = _read_or_init_schedule()
+    conn, df = _read_or_init_schedule(ttl=_schedule_read_ttl())
     if simple_mode:
         section = st.segmented_control(
             "일정 메뉴",
@@ -152,6 +164,7 @@ def run_schedule_ui(simple_mode=False):
             _render_schedule_create(conn, df)
         else:
             _render_schedule_delete(conn, df)
+    perf_log("schedule.run_schedule_ui", (time.perf_counter() - _t0) * 1000.0)
 
 
 def _is_active_in_month(row, year, month):
@@ -296,6 +309,7 @@ def _render_schedule_create(conn, df):
             }])
             updated = pd.concat([df, new_row], ignore_index=True) if not df.empty else new_row
             _safe_update(conn, worksheet=WORKSHEET_NAME, data=updated)
+            _mark_schedule_dirty()
             st.success("시간표가 등록되었습니다.")
             st.rerun()
 
@@ -324,6 +338,7 @@ def _render_schedule_delete(conn, df):
         target_id = str(target.iloc[0]["id"])
         updated = df[df["id"].astype(str) != target_id].copy()
         _safe_update(conn, worksheet=WORKSHEET_NAME, data=updated)
+        _mark_schedule_dirty()
         st.success("일정이 삭제되었습니다.")
         st.rerun()
 
@@ -337,5 +352,6 @@ def _render_schedule_delete(conn, df):
             if st.button("삭제", key=f"del_schedule_{row_id}", use_container_width=True):
                 updated = df[df["id"].astype(str) != row_id].copy()
                 _safe_update(conn, worksheet=WORKSHEET_NAME, data=updated)
+                _mark_schedule_dirty()
                 st.success("일정이 삭제되었습니다.")
                 st.rerun()

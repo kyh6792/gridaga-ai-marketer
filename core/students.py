@@ -1,8 +1,15 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 from datetime import datetime
 import time
-from core.database import get_conn
+import base64
+import re
+from pathlib import Path
+from googleapiclient.discovery import build
+from core.database import get_conn, get_sheet_url
+from core.drive import get_service_account_credentials
+from core.perf import perf_log
 
 # 운영 대시보드(승인/최근처리): 메뉴 전환마다 시트 재조회 방지 — 쓰기·승인 시에만 무효화
 _OWNER_DASH_CACHE_TTL_SEC = 60
@@ -10,6 +17,10 @@ _REQ_RAW_CACHE_KEY = "_owner_dash_attendance_requests_raw"
 _REQ_RAW_CACHE_TS = "_owner_dash_attendance_requests_ts"
 _LOG_DASH_CACHE_KEY = "_owner_dash_attendance_log_recent"
 _LOG_DASH_CACHE_TS = "_owner_dash_attendance_log_ts"
+_OWNER_DASH_BUNDLE_KEY = "_owner_dash_bundle"
+_OWNER_DASH_BUNDLE_TS = "_owner_dash_bundle_ts"
+_STUDENTS_API_WS = {"students", "attendance_requests", "attendance_log"}
+_SHEETS_API_SESSION_KEY = "_students_sheets_api_service"
 
 
 def invalidate_owner_dashboard_sheet_caches():
@@ -19,11 +30,81 @@ def invalidate_owner_dashboard_sheet_caches():
         _REQ_RAW_CACHE_TS,
         _LOG_DASH_CACHE_KEY,
         _LOG_DASH_CACHE_TS,
+        _OWNER_DASH_BUNDLE_KEY,
+        _OWNER_DASH_BUNDLE_TS,
     ):
         st.session_state.pop(k, None)
 
 
+def _get_students_sheets_api():
+    svc = st.session_state.get(_SHEETS_API_SESSION_KEY)
+    if svc is not None:
+        return svc
+    creds = get_service_account_credentials(("https://www.googleapis.com/auth/spreadsheets",))
+    if not creds:
+        return None
+    svc = build("sheets", "v4", credentials=creds, cache_discovery=False)
+    st.session_state[_SHEETS_API_SESSION_KEY] = svc
+    return svc
+
+
+def _read_df_via_sheets_api(worksheet: str) -> pd.DataFrame:
+    sheet_url = get_sheet_url()
+    spreadsheet_id = _spreadsheet_id_from_url(sheet_url)
+    if not spreadsheet_id:
+        raise ValueError("스프레드시트 ID를 찾지 못했습니다.")
+    svc = _get_students_sheets_api()
+    if svc is None:
+        raise ValueError("Sheets API 인증 정보를 찾지 못했습니다.")
+    res = (
+        svc.spreadsheets()
+        .values()
+        .get(spreadsheetId=spreadsheet_id, range=f"{worksheet}!A:ZZ")
+        .execute()
+    )
+    rows = res.get("values", [])
+    if not rows:
+        return pd.DataFrame()
+    headers = [str(x) for x in rows[0]]
+    body = rows[1:]
+    width = len(headers)
+    normalized = []
+    for r in body:
+        row = list(r[:width]) + [""] * max(0, width - len(r))
+        normalized.append(row)
+    return pd.DataFrame(normalized, columns=headers)
+
+
+def _update_df_via_sheets_api(worksheet: str, data: pd.DataFrame):
+    sheet_url = get_sheet_url()
+    spreadsheet_id = _spreadsheet_id_from_url(sheet_url)
+    if not spreadsheet_id:
+        raise ValueError("스프레드시트 ID를 찾지 못했습니다.")
+    svc = _get_students_sheets_api()
+    if svc is None:
+        raise ValueError("Sheets API 인증 정보를 찾지 못했습니다.")
+    df = data.copy() if isinstance(data, pd.DataFrame) else pd.DataFrame(data)
+    df = df.astype(object).where(pd.notna(df), "")
+    values = [list(map(str, df.columns.tolist()))] + df.astype(str).values.tolist()
+    svc.spreadsheets().values().clear(
+        spreadsheetId=spreadsheet_id,
+        range=f"{worksheet}!A:ZZ",
+        body={},
+    ).execute()
+    svc.spreadsheets().values().update(
+        spreadsheetId=spreadsheet_id,
+        range=f"{worksheet}!A1",
+        valueInputOption="RAW",
+        body={"values": values},
+    ).execute()
+
+
 def _safe_read(conn, worksheet, ttl=0, retries=2):
+    if worksheet in _STUDENTS_API_WS:
+        try:
+            return _read_df_via_sheets_api(worksheet)
+        except Exception:
+            pass
     last_error = None
     for attempt in range(retries + 1):
         try:
@@ -40,6 +121,12 @@ def _safe_read(conn, worksheet, ttl=0, retries=2):
 
 
 def _safe_update(conn, worksheet, data, retries=2):
+    if worksheet in _STUDENTS_API_WS:
+        try:
+            _update_df_via_sheets_api(worksheet, data)
+            return
+        except Exception:
+            pass
     last_error = None
     for attempt in range(retries + 1):
         try:
@@ -55,11 +142,113 @@ def _safe_update(conn, worksheet, data, retries=2):
             raise
     raise last_error
 
+
+def _spreadsheet_id_from_url(url: str) -> str:
+    m = re.search(r"/spreadsheets/d/([a-zA-Z0-9_-]+)", str(url or ""))
+    return m.group(1) if m else ""
+
+
+def _a1_col(n: int) -> str:
+    s = ""
+    x = int(n)
+    while x > 0:
+        x, r = divmod(x - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
+def _fast_batch_write_for_approvals(
+    students_df: pd.DataFrame,
+    req_df: pd.DataFrame,
+    students_updates: list[tuple[int, int]],
+    req_updates: list[tuple[int, str, str]],
+    log_rows: list[dict],
+) -> bool:
+    """Sheets API row-level write path. Returns True on success."""
+    try:
+        sheet_url = get_sheet_url()
+        spreadsheet_id = _spreadsheet_id_from_url(sheet_url)
+        if not spreadsheet_id:
+            return False
+        creds = get_service_account_credentials(("https://www.googleapis.com/auth/spreadsheets",))
+        if not creds:
+            return False
+        svc = build("sheets", "v4", credentials=creds, cache_discovery=False)
+
+        # students: 잔여 횟수 컬럼만 갱신
+        students_col_idx = students_df.columns.get_loc("잔여 횟수") + 1
+        students_col = _a1_col(students_col_idx)
+        students_data = []
+        for ridx, remain_after in students_updates:
+            row_no = int(ridx) + 2  # header row + 1
+            students_data.append(
+                {"range": f"students!{students_col}{row_no}", "values": [[int(remain_after)]]}
+            )
+        if students_data:
+            svc.spreadsheets().values().batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body={"valueInputOption": "RAW", "data": students_data},
+            ).execute()
+
+        # attendance_requests: status + approved_time 갱신
+        status_col_idx = req_df.columns.get_loc("status") + 1
+        approved_col_idx = req_df.columns.get_loc("approved_time") + 1
+        status_col = _a1_col(status_col_idx)
+        approved_col = _a1_col(approved_col_idx)
+        req_data = []
+        for ridx, status_val, approved_time in req_updates:
+            row_no = int(ridx) + 2
+            req_data.append(
+                {
+                    "range": f"attendance_requests!{status_col}{row_no}:{approved_col}{row_no}",
+                    "values": [[str(status_val), str(approved_time)]],
+                }
+            )
+        if req_data:
+            svc.spreadsheets().values().batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body={"valueInputOption": "RAW", "data": req_data},
+            ).execute()
+
+        # attendance_log: append
+        if log_rows:
+            append_values = [
+                [
+                    str(r.get("time", "")),
+                    str(r.get("student_id", "")),
+                    str(r.get("student_name", "")),
+                    int(r.get("remain_count", 0)),
+                    str(r.get("event", "")),
+                    str(r.get("request_id", "")),
+                    str(r.get("request_time", "")),
+                    str(r.get("approved_time", "")),
+                ]
+                for r in log_rows
+            ]
+            svc.spreadsheets().values().append(
+                spreadsheetId=spreadsheet_id,
+                range="attendance_log!A1",
+                valueInputOption="RAW",
+                insertDataOption="INSERT_ROWS",
+                body={"values": append_values},
+            ).execute()
+
+        return True
+    except Exception:
+        return False
+
 def run_student_ui():
     from core.curriculum import get_course_options, get_course_price_map
     from core.schedule import run_schedule_ui
 
-    st.subheader("👥 원생 관리 및 등록")
+    st.subheader("👥 회원 등록 관리")
+    _attendance_notice = st.session_state.pop("student_attendance_notice", None)
+    if isinstance(_attendance_notice, tuple) and len(_attendance_notice) == 2:
+        kind, msg = _attendance_notice
+        if kind == "success":
+            st.success(str(msg))
+        else:
+            st.error(str(msg))
 
     def _suggest_sessions(course_name):
         course_text = str(course_name).upper()
@@ -79,9 +268,9 @@ def run_student_ui():
                 return int(v or 0)
         return 0
     
-    with st.expander("👥 원생 관리 및 등록", expanded=True):
+    with st.expander("👥 회원 등록 관리", expanded=False):
         student_section = st.segmented_control(
-            "원생 메뉴",
+            "회원 메뉴",
             ["📝 신규 등록", "📋 원생 명부", "✏️ 명부 수정"],
             default="📝 신규 등록",
             key="student_main_section",
@@ -183,7 +372,171 @@ def run_student_ui():
         else:
             display_student_list(show_mode="edit")
 
-    with st.expander("🗓 일정 관리 및 등록", expanded=False):
+    with st.expander("✅ 회원 출석 관리", expanded=bool(st.session_state.pop("open_attendance_manager_once", False))):
+        approve_bg = "linear-gradient(120deg, #8ECF9B 0%, #6FB47F 100%)"
+        reject_bg = "linear-gradient(120deg, #E7A4A4 0%, #D58282 100%)"
+        try:
+            root = Path(__file__).resolve().parent.parent
+            icon_roots = [root / "assets", root.parent / "assets"]
+            for asset_root in icon_roots:
+                ap_path = asset_root / "approved.png"
+                rj_path = asset_root / "rejected.png"
+                if ap_path.exists():
+                    ap_b64 = base64.b64encode(ap_path.read_bytes()).decode("ascii")
+                    approve_bg = f"url('data:image/png;base64,{ap_b64}') center/cover no-repeat"
+                if rj_path.exists():
+                    rj_b64 = base64.b64encode(rj_path.read_bytes()).decode("ascii")
+                    reject_bg = f"url('data:image/png;base64,{rj_b64}') center/cover no-repeat"
+        except Exception:
+            pass
+
+        components.html(
+            f"""
+            <style>
+            div[data-testid="stButton"] > button.approve-art-btn {{
+                background: {approve_bg} !important;
+                background-size: cover !important;
+                background-position: center !important;
+                background-repeat: no-repeat !important;
+                border: none !important;
+                outline: none !important;
+                box-shadow: 0 3px 8px rgba(0, 0, 0, 0.18) !important;
+                color: #ffffff !important;
+                text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35) !important;
+            }}
+            div[data-testid="stButton"] > button.reject-art-btn {{
+                background: {reject_bg} !important;
+                background-size: cover !important;
+                background-position: center !important;
+                background-repeat: no-repeat !important;
+                border: none !important;
+                outline: none !important;
+                box-shadow: 0 3px 8px rgba(0, 0, 0, 0.18) !important;
+                color: #ffffff !important;
+                text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35) !important;
+            }}
+            div[data-testid="stButton"] > button.approve-art-btn:focus,
+            div[data-testid="stButton"] > button.approve-art-btn:focus-visible,
+            div[data-testid="stButton"] > button.reject-art-btn:focus,
+            div[data-testid="stButton"] > button.reject-art-btn:focus-visible {{
+                outline: none !important;
+                border: none !important;
+                box-shadow: 0 3px 8px rgba(0, 0, 0, 0.18) !important;
+            }}
+            </style>
+            <script>
+            (function () {{
+              const doc = window.parent && window.parent.document ? window.parent.document : document;
+              function applyApproveRejectStyles() {{
+                try {{
+                  const btns = doc.querySelectorAll('div[data-testid="stButton"] > button');
+                  btns.forEach((b) => {{
+                    const t = (b.innerText || "").trim();
+                    if (t === "승인") {{
+                      b.classList.add("approve-art-btn");
+                      b.style.setProperty("background", "{approve_bg}", "important");
+                      b.style.setProperty("border", "none", "important");
+                      b.style.setProperty("outline", "none", "important");
+                      b.style.setProperty("color", "#ffffff", "important");
+                    }}
+                    if (t === "거절") {{
+                      b.classList.add("reject-art-btn");
+                      b.style.setProperty("background", "{reject_bg}", "important");
+                      b.style.setProperty("border", "none", "important");
+                      b.style.setProperty("outline", "none", "important");
+                      b.style.setProperty("color", "#ffffff", "important");
+                    }}
+                    if (t.includes("전체 승인")) {{
+                      b.classList.add("approve-art-btn");
+                      b.style.setProperty("background", "{approve_bg}", "important");
+                      b.style.setProperty("border", "none", "important");
+                      b.style.setProperty("outline", "none", "important");
+                      b.style.setProperty("color", "#ffffff", "important");
+                    }}
+                  }});
+                }} catch (e) {{}}
+              }}
+              applyApproveRejectStyles();
+              setTimeout(applyApproveRejectStyles, 80);
+              setTimeout(applyApproveRejectStyles, 250);
+              setTimeout(applyApproveRejectStyles, 600);
+            }})();
+            </script>
+            """,
+            height=0,
+        )
+
+        pending_requests = get_pending_attendance_requests(limit=20, force_refresh=False)
+        pending_count = len(pending_requests) if not pending_requests.empty else 0
+
+        if pending_count > 0:
+            c1, c2 = st.columns([2, 1], gap="small")
+            with c1:
+                st.caption(f"승인 대기 {pending_count}건")
+            with c2:
+                if st.button("✅ 전체 승인", use_container_width=True, key="student_approve_all_pending"):
+                    ok, msg = approve_all_pending_requests(limit=200)
+                    st.session_state["student_attendance_notice"] = ("success", msg) if ok else ("error", msg)
+                    st.rerun()
+        else:
+            st.info("승인 대기 요청이 없습니다.")
+
+        if not pending_requests.empty:
+            for _, row in pending_requests.iterrows():
+                req_id = str(row.get("request_id", ""))
+                req_time = str(row.get("time", ""))
+                student_name = str(row.get("student_name", "회원"))
+                student_id = str(row.get("student_id", ""))
+                with st.container(border=True):
+                    st.markdown(f"**{student_name}** (`{student_id}`)")
+                    st.caption(f"요청: {req_time}")
+                    c_ok, c_no = st.columns(2, gap="small")
+                    with c_ok:
+                        if st.button("승인", key=f"student_approve_req_{req_id}", use_container_width=True):
+                            ok, msg = approve_attendance_request(req_id)
+                            st.session_state["student_attendance_notice"] = ("success", msg) if ok else ("error", msg)
+                            st.rerun()
+                    with c_no:
+                        if st.button("거절", key=f"student_reject_req_{req_id}", use_container_width=True):
+                            ok, msg = reject_attendance_request(req_id)
+                            st.session_state["student_attendance_notice"] = ("success", msg) if ok else ("error", msg)
+                            st.rerun()
+
+        with st.expander("출석표", expanded=False):
+            view_scope = st.segmented_control(
+                "출석표 범위",
+                ["오늘", "이번달"],
+                default="오늘",
+                key="attendance_log_scope",
+                label_visibility="collapsed",
+            )
+            recent_logs = get_recent_attendance_logs(limit=500, force_refresh=False)
+            if recent_logs.empty:
+                st.caption("표시할 출석 이력이 없습니다.")
+            else:
+                work = recent_logs.copy()
+                approved_ts = pd.to_datetime(work["approved_time"], errors="coerce") if "approved_time" in work.columns else pd.Series(pd.NaT, index=work.index)
+                time_ts = pd.to_datetime(work["time"], errors="coerce") if "time" in work.columns else pd.Series(pd.NaT, index=work.index)
+                ts = approved_ts.where(approved_ts.notna(), time_ts)
+                now = datetime.now()
+                if view_scope == "오늘":
+                    mask = ts.dt.date == now.date()
+                else:
+                    mask = (ts.dt.year == now.year) & (ts.dt.month == now.month)
+                filt = work[mask.fillna(False)].copy()
+                if filt.empty:
+                    st.caption("선택한 범위의 출석 이력이 없습니다.")
+                else:
+                    out = pd.DataFrame(
+                        {
+                            "날짜": ts[mask.fillna(False)].dt.strftime("%Y-%m-%d").fillna(""),
+                            "시간": ts[mask.fillna(False)].dt.strftime("%H:%M:%S").fillna(""),
+                            "이름": filt.get("student_name", pd.Series([""] * len(filt))).astype(str).values,
+                        }
+                    )
+                    st.dataframe(out.reset_index(drop=True), use_container_width=True, hide_index=True)
+
+    with st.expander("🗓 회원 일정 관리", expanded=False):
         run_schedule_ui(simple_mode=True)
 def generate_student_id(df):
     """연도+순번 형태의 고유 ID 생성 (예: 26001)"""
@@ -817,7 +1170,16 @@ def get_owner_dashboard_data(
     force_refresh: bool = False,
 ):
     """운영 대시보드용 통합 조회(요청/실패/최근로그). 시트 read 횟수를 최소화합니다."""
+    _t0 = time.perf_counter()
     try:
+        now = time.time()
+        if not force_refresh:
+            ts = st.session_state.get(_OWNER_DASH_BUNDLE_TS)
+            cached = st.session_state.get(_OWNER_DASH_BUNDLE_KEY)
+            if ts is not None and cached is not None and (now - ts) < _OWNER_DASH_CACHE_TTL_SEC:
+                perf_log("students.get_owner_dashboard_data", (time.perf_counter() - _t0) * 1000.0)
+                return cached
+
         conn = get_conn()
         req_df = _get_attendance_requests_raw_cached(conn, force_refresh=force_refresh)
 
@@ -835,18 +1197,29 @@ def get_owner_dashboard_data(
                 failed_work = failed_work.sort_values(by="approved_time", ascending=False)
             failed = failed_work[failed_work["status"].astype(str) == "approved_log_failed"].head(failed_limit).copy() if "status" in failed_work.columns else pd.DataFrame()
 
-        recent = get_recent_attendance_logs(limit=recent_limit, force_refresh=force_refresh)
-        return pending, failed, recent
+        if int(recent_limit) > 0:
+            recent = get_recent_attendance_logs(limit=recent_limit, force_refresh=force_refresh)
+        else:
+            recent = pd.DataFrame(
+                columns=["time", "student_id", "student_name", "remain_count", "event", "request_id", "request_time", "approved_time"]
+            )
+        out = (pending, failed, recent)
+        st.session_state[_OWNER_DASH_BUNDLE_KEY] = out
+        st.session_state[_OWNER_DASH_BUNDLE_TS] = now
+        perf_log("students.get_owner_dashboard_data", (time.perf_counter() - _t0) * 1000.0)
+        return out
     except Exception:
         empty_req = pd.DataFrame(columns=["request_id", "time", "student_id", "student_name", "status", "approved_time"])
         empty_log = pd.DataFrame(
             columns=["time", "student_id", "student_name", "remain_count", "event", "request_id", "request_time", "approved_time"]
         )
+        perf_log("students.get_owner_dashboard_data", (time.perf_counter() - _t0) * 1000.0)
         return empty_req, empty_req.copy(), empty_log
 
 
 def approve_attendance_request(request_id):
     """원장이 요청을 승인하면 실제 1회 차감합니다."""
+    _t0 = time.perf_counter()
     try:
         conn = get_conn()
         req_df = _read_or_init_attendance_requests(conn)
@@ -889,44 +1262,163 @@ def approve_attendance_request(request_id):
         invalidate_owner_dashboard_sheet_caches()
         student_name = str(req_df.at[row_idx, "student_name"])
         if str(req_df.at[row_idx, "status"]) == "approved_log_failed":
+            perf_log("students.approve_attendance_request", (time.perf_counter() - _t0) * 1000.0)
             return True, f"{student_name}님 차감은 완료되었지만 로그 저장은 실패했습니다. (재시도 필요)"
         if is_sunday:
+            perf_log("students.approve_attendance_request", (time.perf_counter() - _t0) * 1000.0)
             return True, "일요일은 출석을 레슨 없는 자율 작업 날이라 승인해도 차감되지 않습니다."
+        perf_log("students.approve_attendance_request", (time.perf_counter() - _t0) * 1000.0)
         return True, f"{student_name}님 승인 완료! 남은 횟수: {result}회"
     except Exception as e:
+        perf_log("students.approve_attendance_request", (time.perf_counter() - _t0) * 1000.0)
         return False, f"승인 처리 실패: {e}"
 
 
 def approve_all_pending_requests(limit=200):
     """대기중 요청을 최신순으로 일괄 승인합니다."""
+    _t0 = time.perf_counter()
     try:
-        pending_df = get_pending_attendance_requests(limit=limit, force_refresh=True)
+        conn = get_conn()
+        req_df = _read_or_init_attendance_requests(conn, read_ttl=0)
+        if req_df is None or req_df.empty:
+            return False, "승인할 대기 요청이 없습니다."
+        if "status" not in req_df.columns:
+            return False, "요청 데이터 형식이 올바르지 않습니다."
+
+        pending_df = req_df[req_df["status"].astype(str) == "pending"].copy()
+        if "time" in pending_df.columns:
+            pending_df = pending_df.sort_values(by="time", ascending=False)
+        pending_df = pending_df.head(limit)
         if pending_df is None or pending_df.empty:
             return False, "승인할 대기 요청이 없습니다."
+
+        students_df = _safe_read(conn, worksheet="students", ttl=0)
+        if students_df is None or students_df.empty:
+            return False, "원생 정보를 불러올 수 없습니다."
+        if "ID" not in students_df.columns:
+            return False, "원생 데이터 형식이 올바르지 않습니다."
+        students_df["ID"] = pd.to_numeric(students_df["ID"], errors="coerce").fillna(0).astype(int).astype(str)
+        if "잔여 횟수" not in students_df.columns:
+            students_df["잔여 횟수"] = 0
+        if "상태" not in students_df.columns:
+            students_df["상태"] = "재원"
+
+        log_columns = [
+            "time",
+            "student_id",
+            "student_name",
+            "remain_count",
+            "event",
+            "request_id",
+            "request_time",
+            "approved_time",
+        ]
 
         success_cnt = 0
         fail_cnt = 0
         fail_msgs = []
+        log_rows = []
+        is_sunday = datetime.now().weekday() == 6
+        students_changed = False
+        students_updates = []
+        req_updates = []
 
-        for _, row in pending_df.iterrows():
+        for req_idx, row in pending_df.iterrows():
             req_id = str(row.get("request_id", "")).strip()
             if not req_id:
                 fail_cnt += 1
                 continue
-            ok, msg = approve_attendance_request(req_id)
-            if ok:
-                success_cnt += 1
-            else:
+            student_id = _normalize_student_id_text(row.get("student_id", ""))
+            sidx = students_df.index[students_df["ID"] == str(student_id)].tolist()
+            if not sidx:
                 fail_cnt += 1
                 if len(fail_msgs) < 3:
-                    fail_msgs.append(str(msg))
+                    fail_msgs.append(f"{req_id}: 원생 정보를 찾을 수 없습니다.")
+                continue
 
-        if fail_cnt == 0:
-            return True, f"전체 승인 완료: {success_cnt}건"
+            srow = sidx[0]
+            status_val = _normalize_student_status(students_df.at[srow, "상태"])
+            if isinstance(status_val, str) and status_val != "재원":
+                fail_cnt += 1
+                if len(fail_msgs) < 3:
+                    fail_msgs.append(f"{req_id}: 상태「{status_val}」는 차감 불가")
+                continue
+
+            _remain_num = pd.to_numeric(students_df.at[srow, "잔여 횟수"], errors="coerce")
+            current_count = int(0 if pd.isna(_remain_num) else _remain_num)
+            if not is_sunday and current_count <= 0:
+                fail_cnt += 1
+                if len(fail_msgs) < 3:
+                    fail_msgs.append(f"{req_id}: 잔여 횟수 부족")
+                continue
+
+            approved_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            remain_after = current_count if is_sunday else (current_count - 1)
+            if not is_sunday:
+                students_df.at[srow, "잔여 횟수"] = remain_after
+                students_changed = True
+                students_updates.append((int(srow), int(remain_after)))
+
+            req_df.at[req_idx, "status"] = "approved"
+            req_df.at[req_idx, "approved_time"] = approved_time
+            req_updates.append((int(req_idx), "approved", approved_time))
+
+            log_rows.append(
+                {
+                    "time": approved_time,
+                    "student_id": str(student_id),
+                    "student_name": str(row.get("student_name", "회원")),
+                    "remain_count": int(remain_after),
+                    "event": "attendance_free_drawing" if is_sunday else "attendance_deducted",
+                    "request_id": req_id,
+                    "request_time": str(row.get("time", "")),
+                    "approved_time": approved_time,
+                }
+            )
+            success_cnt += 1
+
+        if success_cnt > 0:
+            fast_ok = _fast_batch_write_for_approvals(
+                students_df=students_df,
+                req_df=req_df,
+                students_updates=students_updates if students_changed else [],
+                req_updates=req_updates,
+                log_rows=log_rows,
+            )
+            if not fast_ok:
+                if students_changed:
+                    _safe_update(conn, worksheet="students", data=students_df)
+                if log_rows:
+                    try:
+                        log_df = _safe_read(conn, worksheet="attendance_log", ttl=15)
+                    except Exception:
+                        log_df = pd.DataFrame(columns=log_columns)
+                    if log_df is None or log_df.empty:
+                        log_df = pd.DataFrame(columns=log_columns)
+                    for col in log_columns:
+                        if col not in log_df.columns:
+                            log_df[col] = ""
+                    log_df = pd.concat([log_df, pd.DataFrame(log_rows)], ignore_index=True)
+                    _safe_update(conn, worksheet="attendance_log", data=log_df)
+                _safe_update(conn, worksheet="attendance_requests", data=req_df)
+            invalidate_owner_dashboard_sheet_caches()
+
+        if fail_cnt == 0 and success_cnt > 0:
+            suffix = " (일요일: 차감 없이 승인 처리)" if is_sunday else ""
+            perf_log("students.approve_all_pending_requests", (time.perf_counter() - _t0) * 1000.0)
+            return True, f"전체 승인 완료: {success_cnt}건{suffix}"
+        if success_cnt == 0:
+            detail = f" (예: {' | '.join(fail_msgs)})" if fail_msgs else ""
+            perf_log("students.approve_all_pending_requests", (time.perf_counter() - _t0) * 1000.0)
+            return False, f"승인 실패: {fail_cnt}건{detail}"
+
         extra = f" / 실패 {fail_cnt}건"
         detail = f" (예: {' | '.join(fail_msgs)})" if fail_msgs else ""
-        return True, f"일괄 처리: 승인 {success_cnt}건{extra}{detail}"
+        suffix = " / 일요일: 차감 없이 승인 처리" if is_sunday else ""
+        perf_log("students.approve_all_pending_requests", (time.perf_counter() - _t0) * 1000.0)
+        return True, f"일괄 처리: 승인 {success_cnt}건{extra}{suffix}{detail}"
     except Exception as e:
+        perf_log("students.approve_all_pending_requests", (time.perf_counter() - _t0) * 1000.0)
         return False, f"전체 승인 실패: {e}"
 
 
@@ -1077,15 +1569,16 @@ def get_recent_attendance_logs(limit=10, force_refresh: bool = False):
                 if cached is not None:
                     return cached.head(limit).copy()
 
+        read_ttl = 0 if force_refresh else 60
         try:
-            df = _safe_read(conn, worksheet="attendance_log", ttl=0)
+            df = _safe_read(conn, worksheet="attendance_log", ttl=read_ttl)
         except Exception:
             # 탭이 없으면 빈 탭 자동 생성 시도
             empty_df = pd.DataFrame(
                 columns=["time", "student_id", "student_name", "remain_count", "event", "request_id", "request_time", "approved_time"]
             )
             _safe_update(conn, worksheet="attendance_log", data=empty_df)
-            df = _safe_read(conn, worksheet="attendance_log", ttl=0)
+            df = _safe_read(conn, worksheet="attendance_log", ttl=read_ttl)
 
         if df is None or df.empty:
             out = pd.DataFrame(
