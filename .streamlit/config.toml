@@ -1,23 +1,20 @@
 [runner]
-# 메뉴·위젯 전환 시 불필요한 전체 재실행 완화
 fastReruns = true
 
 [client]
-# 상단 툴바를 최소화 (일부 환경에서 Running 인접 UI 완화)
 toolbarMode = "minimal"
 
+[server]
+address = "0.0.0.0"
+headless = true
+enableCORS = false
+enableXsrfProtection = false
+maxUploadSize = 20
+
 [theme]
-# 메인 컬러 (버튼, 포커스 색상) - 작업실의 감성적인 포인트 컬러(예: 따뜻한 코랄 또는 브라운)
-primaryColor = "#D98880" 
-
-# 배경색 (너무 쨍한 흰색보다는 부드러운 웜톤이나 세련된 다크톤)
-backgroundColor = "#FAF9F6" 
-
-# 보조 배경색 (사이드바 등)
+# 위젯 포커스·선택에 쓰이는 색 — 붉은 primary는 세그먼트 등에서 글자가 묻힘; 대시보드 브라운으로 통일
+primaryColor = "#8E6242"
+backgroundColor = "#FAF9F6"
 secondaryBackgroundColor = "#F2F0E6"
-
-# 글자 색상
 textColor = "#333333"
-
-# 폰트 스타일 (기본값인 'sans serif' 외에 'serif'나 'monospace' 선택 가능)
-font = "serif" # 우아한 명조체 느낌을 줍니다.
+font = "serif"

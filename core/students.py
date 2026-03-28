@@ -241,7 +241,7 @@ def run_student_ui():
     from core.curriculum import get_course_options, get_course_price_map
     from core.schedule import run_schedule_ui
 
-    st.subheader("👥 회원 등록 관리")
+    st.subheader("👥 회원 관리")
     _attendance_notice = st.session_state.pop("student_attendance_notice", None)
     if isinstance(_attendance_notice, tuple) and len(_attendance_notice) == 2:
         kind, msg = _attendance_notice

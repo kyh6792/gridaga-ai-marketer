@@ -211,18 +211,26 @@ def sync_owner_session_from_query():
 
 
 def render_intro_branch():
-    student_bg = "linear-gradient(120deg, #C09066 0%, #B47F57 55%, #A86E48 100%)"
-    teacher_bg = "linear-gradient(120deg, #9E6B43 0%, #8E5F3D 58%, #7E5233 100%)"
+    # 이미지가 있을 때: 뒤 레이어 없음 → PNG 투명 부분이 앱 캔버스 배경을 비춤 (베이지 박스 금지)
+    student_fallback = "linear-gradient(120deg, #C09066 0%, #B47F57 55%, #A86E48 100%)"
+    teacher_fallback = "linear-gradient(120deg, #9E6B43 0%, #8E5F3D 58%, #7E5233 100%)"
+    student_bg = student_fallback
+    teacher_bg = teacher_fallback
     try:
         root = Path(__file__).resolve().parent
-        s_path = root / "assets" / "student_bt.png"
-        t_path = root / "assets" / "teacher_bt.png"
-        if s_path.exists():
-            s_b64 = base64.b64encode(s_path.read_bytes()).decode("ascii")
-            student_bg = f"url('data:image/png;base64,{s_b64}') center/cover no-repeat"
-        if t_path.exists():
-            t_b64 = base64.b64encode(t_path.read_bytes()).decode("ascii")
-            teacher_bg = f"url('data:image/png;base64,{t_b64}') center/cover no-repeat"
+        assets = root / "assets"
+        for s_name in ("student_bt.png", "student_bt.PNG"):
+            s_path = assets / s_name
+            if s_path.exists():
+                s_b64 = base64.b64encode(s_path.read_bytes()).decode("ascii")
+                student_bg = f"url('data:image/png;base64,{s_b64}') center / contain no-repeat"
+                break
+        for t_name in ("teacher_bt.png", "teacher_bt.PNG"):
+            t_path = assets / t_name
+            if t_path.exists():
+                t_b64 = base64.b64encode(t_path.read_bytes()).decode("ascii")
+                teacher_bg = f"url('data:image/png;base64,{t_b64}') center / contain no-repeat"
+                break
     except Exception:
         pass
 
@@ -249,26 +257,95 @@ def render_intro_branch():
             font-size: 0.93rem;
             line-height: 1.4;
         }
-        div[data-testid="stButton"] > button.entry-student-btn,
-        div[data-testid="stButton"] > button.entry-teacher-btn {
+        /* 입장 버튼: 래퍼까지 투명 — 스트림릿 기본 박스색이 붓 뒤로 비치지 않게 */
+        div[data-testid="stButton"].entry-btn-shell {
+            background: transparent !important;
+            background-color: transparent !important;
             border: none !important;
             box-shadow: none !important;
-            color: #4A3526 !important;
-            font-weight: 700 !important;
-            min-height: 54px !important;
+            padding: 0 !important;
+        }
+        div[data-testid="stButton"].entry-btn-shell > div {
+            background: transparent !important;
+            background-color: transparent !important;
+            box-shadow: none !important;
+        }
+        div[data-testid="stButton"] > button.entry-student-btn,
+        div[data-testid="stButton"] > button.entry-teacher-btn {
+            position: relative !important;
+            border: none !important;
+            outline: none !important;
+            box-shadow: none !important;
+            -webkit-appearance: none !important;
+            appearance: none !important;
+            padding: 0 !important;
+            margin: 0 !important;
+            /* 두 버튼 세로 크기 동일 (이미지 원본 높이 차이와 무관) */
+            min-height: 112px !important;
+            height: 112px !important;
+            max-height: 112px !important;
+            border-radius: 16px !important;
+            /* hidden 켜면 투명 영역이 잘려 캔버스가 안 보일 수 있음 */
+            overflow: visible !important;
             transition: transform 120ms ease, filter 120ms ease !important;
+            box-sizing: border-box !important;
+            background-color: transparent !important;
+        }
+        div[data-testid="stButton"] > button.entry-student-btn:focus-visible,
+        div[data-testid="stButton"] > button.entry-teacher-btn:focus-visible {
+            outline: 2px solid #B88962 !important;
+            outline-offset: 3px !important;
+        }
+        div[data-testid="stButton"] > button.entry-student-btn > div,
+        div[data-testid="stButton"] > button.entry-teacher-btn > div {
+            position: absolute !important;
+            inset: 0 !important;
+            border: none !important;
+            box-shadow: none !important;
+            padding: 0 0.75rem !important;
+            margin: 0 !important;
+            width: 100% !important;
+            height: 100% !important;
+            min-width: 0 !important;
+            box-sizing: border-box !important;
+            display: flex !important;
+            flex-direction: column !important;
+            justify-content: center !important;
+            align-items: center !important;
+            /* 배경 이미지는 button에만 — 여기서 어두운 막 깔면 또 ‘뒷판’처럼 보일 수 있음 */
+            background: transparent !important;
+            pointer-events: none !important;
+        }
+        div[data-testid="stButton"] > button.entry-student-btn p,
+        div[data-testid="stButton"] > button.entry-student-btn span,
+        div[data-testid="stButton"] > button.entry-teacher-btn p,
+        div[data-testid="stButton"] > button.entry-teacher-btn span {
+            pointer-events: none !important;
+            position: relative !important;
+            width: auto !important;
+            max-width: 100% !important;
+            height: auto !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            overflow: visible !important;
+            clip: auto !important;
+            white-space: normal !important;
+            border: 0 !important;
+            color: #FFF8F0 !important;
+            font-size: 1.22rem !important;
+            font-weight: 800 !important;
+            line-height: 1.25 !important;
+            letter-spacing: -0.02em !important;
+            text-align: center !important;
+            text-shadow: 0 1px 4px rgba(24, 14, 8, 0.75), 0 0 1px rgba(24, 14, 8, 0.5) !important;
         }
         div[data-testid="stButton"] > button.entry-student-btn {
             background: __STUDENT_BG__ !important;
-            background-size: cover !important;
-            background-position: center !important;
-            background-repeat: no-repeat !important;
+            background-color: transparent !important;
         }
         div[data-testid="stButton"] > button.entry-teacher-btn {
             background: __TEACHER_BG__ !important;
-            background-size: cover !important;
-            background-position: center !important;
-            background-repeat: no-repeat !important;
+            background-color: transparent !important;
         }
         div[data-testid="stButton"] > button.entry-student-btn:active,
         div[data-testid="stButton"] > button.entry-teacher-btn:active {
@@ -308,8 +385,15 @@ def render_intro_branch():
               const btns = doc.querySelectorAll('div[data-testid="stButton"] > button');
               btns.forEach((b) => {
                 const t = (b.innerText || "").trim();
-                if (t.includes("원생용")) b.classList.add("entry-student-btn");
-                if (t.includes("선생님")) b.classList.add("entry-teacher-btn");
+                const shell = b.closest('div[data-testid="stButton"]');
+                if (t.includes("원생용")) {
+                  b.classList.add("entry-student-btn");
+                  if (shell) shell.classList.add("entry-btn-shell");
+                }
+                if (t.includes("선생님")) {
+                  b.classList.add("entry-teacher-btn");
+                  if (shell) shell.classList.add("entry-btn-shell");
+                }
               });
             } catch (e) {}
           }
@@ -570,20 +654,20 @@ def render_owner_menu():
         _t_cards = time.perf_counter()
         perf_log("app.render_dashboard_cards", (time.perf_counter() - _t_cards) * 1000.0)
 
-    # 주메뉴/본문은 항상 1열 고정 (분할 레이아웃 제거)
-    with st.expander("메뉴", expanded=True):
+    # 주메뉴만 border 박스(높이 슬림). fragment는 박스 밖에서 돌려 테두리 안 빈 여백이 커지지 않게 함.
+    with st.container(border=True, key="owner_menu_bar"):
         render_owner_menu_grid(
             st.session_state.get("owner_login_at", ""),
             active_idx=int(st.session_state.get("owner_menu_index", 0)),
         )
-        if hasattr(st, "fragment"):
-            @st.fragment(run_every="120s")
-            def auto_refresh_owner_cards():
-                render_dashboard_cards()
-
-            auto_refresh_owner_cards()
-        else:
+    if hasattr(st, "fragment"):
+        @st.fragment(run_every="120s")
+        def auto_refresh_owner_cards():
             render_dashboard_cards()
+
+        auto_refresh_owner_cards()
+    else:
+        render_dashboard_cards()
 
     selected_idx = int(st.session_state.get("owner_menu_index", 0))
     if selected_idx < 0 or selected_idx > 3:

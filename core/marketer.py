@@ -53,6 +53,7 @@ def _render_copy_button(text: str, key: str, label: str = "📋 복사하기"):
 
 
 def run_marketing_ui():
+    st.header("📢 마케팅")
     # 1. 상단 메뉴 (히스토리 분리)
     menu = st.segmented_control(
         "마케팅 메뉴",
@@ -91,10 +92,11 @@ def run_marketing_ui():
                 st.info("Google 로그인 세션이 필요합니다. 원장 인증에서 다시 로그인해 주세요.")
 
             uploaded_files = st.file_uploader(
-                "📷 사진을 선택하세요 (최대 5장)",
+                "📷 사진을 선택하세요 (최대 5장, 장당 20MB)",
                 type=['jpg', 'jpeg', 'png'],
                 accept_multiple_files=True,
             )
+            st.caption("Cloud Run 업로드 한계로 장당 20MB 이하 사진만 권장합니다.")
             if uploaded_files:
                 picked = uploaded_files[:5]
                 if len(uploaded_files) > 5:
