@@ -302,10 +302,10 @@ def render_intro_branch():
             width: 100% !important;
             max-width: 100% !important;
             box-sizing: border-box !important;
-            /* 두 버튼 동일 박스 + cover로 이미지 비율 차이 최소화 */
-            min-height: 112px !important;
-            height: 112px !important;
-            max-height: 112px !important;
+            /* 두 버튼 동일 박스(기존 대비 약 2/3 크기) */
+            min-height: 75px !important;
+            height: 75px !important;
+            max-height: 75px !important;
             border-radius: 16px !important;
             /* hidden 켜면 투명 영역이 잘려 캔버스가 안 보일 수 있음 */
             overflow: visible !important;
