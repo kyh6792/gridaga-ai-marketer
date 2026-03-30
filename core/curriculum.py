@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime
-import re
 import time
 from core.database import get_conn
 from core.perf import perf_log
@@ -10,118 +9,21 @@ from core.perf import perf_log
 WORKSHEET_NAME = "curriculum"
 _CURRICULUM_NEXT_READ_FRESH = "_curriculum_next_read_fresh"
 
+# 시트 컬럼 (영문): 코스ID, 코스이름, 횟수, 금액, 설명, 만들어진 날짜, 순서
+COURSE_COLUMNS = [
+    "course_id",
+    "course_name",
+    "sessions",
+    "amount",
+    "description",
+    "created_at",
+    "sort_order",
+]
+
 
 def _mark_curriculum_dirty():
     """커리큘럼 쓰기 직후 다음 조회 1회는 ttl 캐시를 우회."""
     st.session_state[_CURRICULUM_NEXT_READ_FRESH] = True
-
-
-def _curriculum_read_ttl(default_ttl=60):
-    return 0 if st.session_state.pop(_CURRICULUM_NEXT_READ_FRESH, False) else default_ttl
-
-
-DEFAULT_CURRICULUM_ROWS = [
-    {
-        "id": "course_001",
-        "category": "코스",
-        "title": "정규반 | 코스 A",
-        "content": "4회권 (2.5h) / 180,000원 (2개월 내 소진)",
-        "sort_order": 0,
-        "created_at": "",
-    },
-    {
-        "id": "course_002",
-        "category": "코스",
-        "title": "정규반 | 코스 B",
-        "content": "8회권 (2.5h) / 340,000원 (3개월 내 소진)",
-        "sort_order": 0,
-        "created_at": "",
-    },
-    {
-        "id": "course_003",
-        "category": "코스",
-        "title": "원데이 클래스 | 체험 코스",
-        "content": "원데이 체험 코스",
-        "sort_order": 0,
-        "created_at": "",
-    },
-    {
-        "id": "edu_001",
-        "category": "교육 내용",
-        "title": "다양한 재료와 기법",
-        "content": "소묘, 드로잉, 수채화, 아크릴, 유화, 오일파스텔, 판화 등 다양한 재료와 기법으로 본인의 그림을 찾아갈 수 있도록 지도합니다.",
-        "sort_order": 1,
-        "created_at": "",
-    },
-    {
-        "id": "edu_002",
-        "category": "교육 내용",
-        "title": "개인 맞춤 진도",
-        "content": "상담을 통해 기초부터 심화 과정까지 개인의 속도와 취향에 맞춰 진도를 조율합니다.",
-        "sort_order": 2,
-        "created_at": "",
-    },
-    {
-        "id": "edu_003",
-        "category": "교육 내용",
-        "title": "소수정예 레슨",
-        "content": "타임당 최대 4명 이하의 소수정예 레슨으로 1:1 맞춤형 커리큘럼으로 진행합니다.",
-        "sort_order": 3,
-        "created_at": "",
-    },
-    {
-        "id": "tt_001",
-        "category": "수업 시간표",
-        "title": "정규 클래스 안내",
-        "content": "여유로운 작업 시간을 위해 정규 클래스는 2시간 30분 동안 진행됩니다.",
-        "sort_order": 10,
-        "created_at": "",
-    },
-    {
-        "id": "tt_002",
-        "category": "수업 시간표",
-        "title": "평일 (월~금)",
-        "content": "[오전반] 10:30 ~ 13:00\n[오후반] 14:30 ~ 17:00\n[저녁반] 18:30 ~ 21:00",
-        "sort_order": 11,
-        "created_at": "",
-    },
-    {
-        "id": "tt_003",
-        "category": "수업 시간표",
-        "title": "토요일",
-        "content": "[오전반] 09:30 ~ 12:00\n[오후반] 13:00 ~ 15:30",
-        "sort_order": 12,
-        "created_at": "",
-    },
-    {
-        "id": "tt_004",
-        "category": "수업 시간표",
-        "title": "일요일",
-        "content": "레슨 없는 '자율 작업'",
-        "sort_order": 13,
-        "created_at": "",
-    },
-    {
-        "id": "fee_001",
-        "category": "수업료",
-        "title": "4회권 (2.5h)",
-        "content": "180,000원 (2개월 내 소진)",
-        "sort_order": 20,
-        "created_at": "",
-    },
-    {
-        "id": "fee_002",
-        "category": "수업료",
-        "title": "8회권 (2.5h)",
-        "content": "340,000원 (3개월 내 소진)",
-        "sort_order": 21,
-        "created_at": "",
-    },
-]
-
-
-def _base_columns():
-    return ["id", "category", "title", "content", "sort_order", "created_at"]
 
 
 def _safe_read(conn, worksheet, ttl=0, retries=2):
@@ -157,327 +59,301 @@ def _safe_update(conn, worksheet, data, retries=2):
     raise last_error
 
 
+def _coerce_course_df(df):
+    if df is None or df.empty:
+        return pd.DataFrame(columns=COURSE_COLUMNS)
+    out = df.copy()
+    for c in COURSE_COLUMNS:
+        if c not in out.columns:
+            if c in ("course_id", "course_name", "description", "created_at"):
+                out[c] = ""
+            else:
+                out[c] = 0
+    out = out[COURSE_COLUMNS].copy()
+    out["sessions"] = pd.to_numeric(out["sessions"], errors="coerce").fillna(0).astype(int)
+    out["amount"] = pd.to_numeric(out["amount"], errors="coerce").fillna(0).astype(int)
+    out["sort_order"] = pd.to_numeric(out["sort_order"], errors="coerce").fillna(9999).astype(int)
+    out["course_id"] = out["course_id"].astype(str).str.strip()
+    out["course_name"] = out["course_name"].astype(str).str.strip()
+    out["description"] = out["description"].astype(str)
+    out["created_at"] = out["created_at"].astype(str).str.strip()
+    return out
+
+
+def _normalize_curriculum(df):
+    """시트를 읽기만 함. 레거시 형식 자동 변환·시트 덮어쓰기 없음."""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=COURSE_COLUMNS)
+    if "course_id" in df.columns and "course_name" in df.columns:
+        return _coerce_course_df(df)
+    return pd.DataFrame(columns=COURSE_COLUMNS)
+
+
 def _safe_read_curriculum(conn, ttl=60):
     try:
         df = _safe_read(conn, worksheet=WORKSHEET_NAME, ttl=ttl)
     except Exception as e:
         msg = str(e)
-        # 쿼터 초과 시에는 생성/업데이트 시도하지 않고 빈 데이터로 안전 fallback
         if "429" in msg or "RESOURCE_EXHAUSTED" in msg or "RATE_LIMIT_EXCEEDED" in msg:
             st.session_state["curriculum_error"] = "커리큘럼 시트 조회 한도를 초과했습니다. 잠시 후 다시 시도해주세요."
-            return pd.DataFrame(columns=_base_columns())
-        df = pd.DataFrame(columns=_base_columns())
+            return pd.DataFrame(columns=COURSE_COLUMNS)
+        df = pd.DataFrame(columns=COURSE_COLUMNS)
         _safe_update(conn, worksheet=WORKSHEET_NAME, data=df)
         df = _safe_read(conn, worksheet=WORKSHEET_NAME, ttl=ttl)
 
-    if df is None or df.empty:
-        return pd.DataFrame(columns=_base_columns())
-
-    for col in _base_columns():
-        if col not in df.columns:
-            df[col] = ""
-    return df[_base_columns()].copy()
-
-
-def _seed_default_if_empty(conn, df):
-    if df.empty:
-        seeded = pd.DataFrame(DEFAULT_CURRICULUM_ROWS)
-        seeded["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        _safe_update(conn, worksheet=WORKSHEET_NAME, data=seeded)
-        return seeded
+    if df is None:
+        return pd.DataFrame(columns=COURSE_COLUMNS)
     return df
 
 
-def _ensure_default_courses(conn, df):
-    """시트가 비어있지 않아도 기본 코스가 없으면 자동 추가"""
-    if df is None:
-        df = pd.DataFrame(columns=_base_columns())
-    if df.empty:
-        return df
-
-    default_courses = [row for row in DEFAULT_CURRICULUM_ROWS if row.get("category") == "코스"]
-    existing_titles = set(df[df["category"] == "코스"]["title"].astype(str).str.strip().tolist()) if "category" in df.columns else set()
-
-    missing_rows = []
-    now_txt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    for row in default_courses:
-        title = str(row.get("title", "")).strip()
-        if title and title not in existing_titles:
-            new_row = row.copy()
-            new_row["id"] = f"{row.get('id', 'course')}_{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
-            new_row["created_at"] = now_txt
-            missing_rows.append(new_row)
-
-    if not missing_rows:
-        return df
-
-    add_df = pd.DataFrame(missing_rows)
-    updated = pd.concat([df, add_df], ignore_index=True)
-    _safe_update(conn, worksheet=WORKSHEET_NAME, data=updated)
-    return updated
-
-
-def _load_curriculum(ttl=60):
+def _load_curriculum(base_ttl=60):
+    """base_ttl=0 이면 항상 시트 재조회. 커리큘럼 저장 직후 플래그가 있으면 1회 ttl=0."""
     conn = get_conn()
-    df = _safe_read_curriculum(conn, ttl=ttl)
-    df = _seed_default_if_empty(conn, df)
-    df = _ensure_default_courses(conn, df)
+    stale_clear = st.session_state.pop(_CURRICULUM_NEXT_READ_FRESH, False)
+    ttl = 0 if stale_clear or base_ttl == 0 else base_ttl
+    raw = _safe_read_curriculum(conn, ttl=ttl)
+    df = _normalize_curriculum(raw)
+    if raw is not None and not raw.empty and df.empty:
+        st.session_state["curriculum_schema_hint"] = (
+            "시트에 행은 있지만 **course_id**, **course_name** 열이 없어 목록에 표시하지 않았습니다. "
+            "Google 시트 첫 행 헤더를 수동으로 맞춰 주세요. (레거시 자동 변환·기본 코스 자동 생성 없음)"
+        )
+    else:
+        st.session_state.pop("curriculum_schema_hint", None)
     if not df.empty:
-        df["sort_order"] = pd.to_numeric(df["sort_order"], errors="coerce").fillna(9999).astype(int)
-        df = df.sort_values(by=["category", "sort_order", "created_at"], ascending=[True, True, True])
+        df = df.sort_values(by=["sort_order", "created_at", "course_id"], ascending=[True, True, True])
     return conn, df
 
 
 def run_curriculum_ui():
     _t0 = time.perf_counter()
     st.header("📚 커리큘럼")
-    conn, df = _load_curriculum(ttl=_curriculum_read_ttl())
+
+    conn, df = _load_curriculum(60)
+    err = st.session_state.pop("curriculum_error", None)
+    if err:
+        st.error(str(err))
+    hint = st.session_state.pop("curriculum_schema_hint", None)
+    if hint:
+        st.warning(str(hint))
 
     section = st.segmented_control(
         "커리큘럼 메뉴",
-        ["🎯 코스 관리", "➕ 등록", "🗑 삭제", "✏️ 일괄 수정"],
+        ["🎯 코스 관리", "✏️ 일괄 수정"],
         default="🎯 코스 관리",
-        key="curriculum_main_section",
+        key="curriculum_main_section_v2",
         label_visibility="collapsed",
     )
 
     if section == "🎯 코스 관리":
         _render_course_manage(conn, df)
-    elif section == "➕ 등록":
-        _render_curriculum_create(conn, df)
-    elif section == "🗑 삭제":
-        _render_curriculum_delete(conn, df)
     else:
-        _render_curriculum_bulk_edit(conn, df)
+        _render_course_bulk_edit(conn, df)
     perf_log("curriculum.run_curriculum_ui", (time.perf_counter() - _t0) * 1000.0)
 
 
-def _render_curriculum_view(df):
-    if df.empty:
-        st.info("등록된 커리큘럼이 없습니다.")
-        return
-
-    view_df = df.copy()
-    view_df["sort_order"] = pd.to_numeric(view_df["sort_order"], errors="coerce").fillna(9999).astype(int)
-    view_df = view_df.sort_values(by=["category", "sort_order", "created_at"], ascending=[True, True, True])
-    st.dataframe(
-        view_df,
-        use_container_width=True,
-        hide_index=True,
-        column_order=["category", "title", "content", "sort_order", "created_at", "id"],
-    )
-
-
 def _render_course_manage(conn, df):
-    st.caption("원생 등록 시 선택되는 코스 항목입니다.")
-    course_df = df[df["category"] == "코스"].copy() if not df.empty else pd.DataFrame(columns=_base_columns())
-    if not course_df.empty:
-        course_df["sort_order"] = pd.to_numeric(course_df["sort_order"], errors="coerce").fillna(9999).astype(int)
-        course_df = course_df.sort_values(by=["sort_order", "created_at"], ascending=[True, True])
-
-    def _split_course_title(title):
-        t = str(title).strip()
-        if "|" in t:
-            group, name = t.split("|", 1)
-            return group.strip(), name.strip()
-        return "기타", t
-
+    st.caption(
+        "시트 컬럼: **course_id**, **course_name**, **sessions**(횟수), **amount**(원), "
+        "**description**, **created_at**, **sort_order** — 원생 등록의 수강 코스 목록·요금·추천 횟수에 반영됩니다."
+    )
+    view = df.copy() if not df.empty else pd.DataFrame(columns=COURSE_COLUMNS)
     st.markdown("**현재 코스 목록**")
-    if course_df.empty:
-        st.info("등록된 코스가 없습니다.")
+    if view.empty:
+        st.info("등록된 코스가 없습니다. 아래에서 추가하거나 **일괄 수정**에서 넣을 수 있습니다.")
     else:
-        view_df = course_df.copy()
-        groups, names = [], []
-        for _, row in view_df.iterrows():
-            g, n = _split_course_title(row.get("title", ""))
-            groups.append(g)
-            names.append(n)
-        view_df["코스 분류"] = groups
-        view_df["코스명"] = names
-        view_df["설명"] = view_df["content"]
         st.dataframe(
-            view_df[["코스 분류", "코스명", "설명", "sort_order", "id"]],
+            view,
             use_container_width=True,
             hide_index=True,
+            column_order=COURSE_COLUMNS,
         )
 
     st.markdown("**코스 추가**")
-    with st.form("course_add_form", clear_on_submit=True):
-        course_group = st.selectbox("코스 분류", ["정규반", "원데이 클래스", "기타"])
-        course_name = st.text_input("코스명", placeholder="예: 코스 A")
-        course_desc = st.text_input("설명", placeholder="예: 기초 드로잉 중심")
-        course_order = st.number_input("정렬 순서", min_value=0, value=50, step=1)
-        add_submitted = st.form_submit_button("코스 추가", use_container_width=True)
-        if add_submitted:
-            if not course_name.strip():
-                st.error("코스명은 필수입니다.")
-                return
-            composed_title = f"{course_group} | {course_name.strip()}"
-            new_row = pd.DataFrame([{
-                "id": f"course_{datetime.now().strftime('%Y%m%d%H%M%S%f')}",
-                "category": "코스",
-                "title": composed_title,
-                "content": course_desc.strip(),
-                "sort_order": int(course_order),
-                "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            }])
-            updated = pd.concat([df, new_row], ignore_index=True) if not df.empty else new_row
-            _safe_update(conn, worksheet=WORKSHEET_NAME, data=updated)
-            _mark_curriculum_dirty()
-            st.success("코스가 추가되었습니다.")
-            st.rerun()
+    with st.form("course_add_form_v2", clear_on_submit=True):
+        c1, c2 = st.columns(2)
+        with c1:
+            add_name = st.text_input("course_name", placeholder="예: 주 1회 정규반")
+            add_sessions = st.number_input("sessions (횟수)", min_value=0, value=4, step=1)
+            add_amount = st.number_input("amount (원)", min_value=0, value=0, step=1000)
+        with c2:
+            add_desc = st.text_input("description", placeholder="선택, 예: 2.5h / 2개월 내 소진")
+            add_order = st.number_input("sort_order", min_value=0, value=50, step=1)
+        if st.form_submit_button("코스 추가", use_container_width=True):
+            if not str(add_name).strip():
+                st.error("course_name은 필수입니다.")
+            else:
+                now_txt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                new_row = pd.DataFrame([{
+                    "course_id": f"course_{datetime.now().strftime('%Y%m%d%H%M%S%f')}",
+                    "course_name": str(add_name).strip(),
+                    "sessions": int(add_sessions),
+                    "amount": int(add_amount),
+                    "description": str(add_desc).strip(),
+                    "created_at": now_txt,
+                    "sort_order": int(add_order),
+                }])
+                base = df.copy() if not df.empty else pd.DataFrame(columns=COURSE_COLUMNS)
+                updated = pd.concat([base, new_row], ignore_index=True)
+                updated = _coerce_course_df(updated)
+                _safe_update(conn, worksheet=WORKSHEET_NAME, data=updated)
+                _mark_curriculum_dirty()
+                st.success("코스가 추가되었습니다.")
+                st.rerun()
 
     st.markdown("**코스 삭제**")
-    if course_df.empty:
+    if view.empty:
         st.caption("삭제할 코스가 없습니다.")
         return
     del_options = {
-        f"{row['title']} (순서 {row['sort_order']})": row["id"]
-        for _, row in course_df.iterrows()
+        f"{row['course_name']} (sort {row['sort_order']}, id {row['course_id']})": str(row["course_id"])
+        for _, row in view.iterrows()
     }
-    selected = st.selectbox("삭제할 코스 선택", list(del_options.keys()))
-    if st.button("선택 코스 삭제", use_container_width=True):
-        target_id = del_options[selected]
-        updated = df[df["id"].astype(str) != str(target_id)].copy()
+    pick = st.selectbox("삭제할 코스", list(del_options.keys()), key="course_delete_pick_v2")
+    if st.button("선택 코스 삭제", use_container_width=True, key="course_delete_btn_v2"):
+        rm_id = del_options[pick]
+        updated = view[view["course_id"].astype(str) != rm_id].copy()
+        updated = _coerce_course_df(updated)
         _safe_update(conn, worksheet=WORKSHEET_NAME, data=updated)
         _mark_curriculum_dirty()
         st.success("코스가 삭제되었습니다.")
         st.rerun()
 
 
-def _render_curriculum_create(conn, df):
-    with st.form("curriculum_create_form", clear_on_submit=True):
-        category = st.selectbox("구분", ["코스", "교육 내용", "수업 시간표", "수업료"])
-        title = st.text_input("제목", placeholder="예: 평일 (월~금)")
-        content = st.text_area("내용", placeholder="예: [오전반] 10:30 ~ 13:00")
-        sort_order = st.number_input("정렬 순서", min_value=1, value=100, step=1)
-        submitted = st.form_submit_button("등록하기", use_container_width=True)
-
-        if submitted:
-            if not content.strip():
-                st.error("내용은 필수입니다.")
-                return
-            new_row = pd.DataFrame([{
-                "id": f"cur_{datetime.now().strftime('%Y%m%d%H%M%S%f')}",
-                "category": category,
-                "title": title.strip(),
-                "content": content.strip(),
-                "sort_order": int(sort_order),
-                "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            }])
-            updated = pd.concat([df, new_row], ignore_index=True) if not df.empty else new_row
-            _safe_update(conn, worksheet=WORKSHEET_NAME, data=updated)
-            _mark_curriculum_dirty()
-            st.success("커리큘럼 항목이 등록되었습니다.")
-            st.rerun()
-
-
-def _render_curriculum_delete(conn, df):
-    if df.empty:
-        st.info("삭제할 항목이 없습니다.")
-        return
-
-    for _, row in df.iterrows():
-        row_id = str(row.get("id", ""))
-        title = str(row.get("title", "")).strip()
-        content = str(row.get("content", "")).strip()
-        with st.container(border=True):
-            st.caption(f"{row.get('category', '')} | 순서 {row.get('sort_order', '')}")
-            if title:
-                st.markdown(f"**{title}**")
-            st.write(content if content else "-")
-            if st.button("삭제", key=f"delete_cur_{row_id}", use_container_width=True):
-                updated = df[df["id"].astype(str) != row_id].copy()
-                _safe_update(conn, worksheet=WORKSHEET_NAME, data=updated)
-                _mark_curriculum_dirty()
-                st.success("삭제되었습니다.")
-                st.rerun()
-
-
-def _render_curriculum_bulk_edit(conn, df):
-    st.caption("표에서 직접 수정한 뒤 저장 버튼을 누르면 시트에 반영됩니다.")
-    if df.empty:
-        st.info("수정할 데이터가 없습니다.")
-        return
-
-    edit_df = df.copy()
-    edit_df["sort_order"] = pd.to_numeric(edit_df["sort_order"], errors="coerce").fillna(0).astype(int)
+def _render_course_bulk_edit(conn, df):
+    st.caption(
+        "표에서 직접 수정합니다. 행을 추가·삭제한 뒤 **일괄 저장**을 누르면 시트에 반영됩니다. "
+        "**course_id**가 비어 있으면 저장 시 자동 발급됩니다. **course_name**은 원생 화면의 코스 이름으로 쓰입니다."
+    )
+    edit_df = df.copy() if not df.empty else pd.DataFrame(columns=COURSE_COLUMNS)
+    edit_df = _coerce_course_df(edit_df)
 
     edited = st.data_editor(
         edit_df,
         use_container_width=True,
         hide_index=True,
         num_rows="dynamic",
-        column_order=["id", "category", "title", "content", "sort_order", "created_at"],
-        key="curriculum_bulk_editor",
+        column_order=COURSE_COLUMNS,
+        key="curriculum_bulk_editor_v2",
+        column_config={
+            "course_id": st.column_config.TextColumn("course_id", help="고유 ID (비우면 자동)"),
+            "course_name": st.column_config.TextColumn("course_name", help="수강 코스 표시명"),
+            "sessions": st.column_config.NumberColumn("sessions", min_value=0, step=1, help="권장 결제 횟수"),
+            "amount": st.column_config.NumberColumn("amount", min_value=0, step=1000, format="%d", help="원 단위"),
+            "description": st.column_config.TextColumn("description"),
+            "created_at": st.column_config.TextColumn("created_at", help="자동 또는 직접 입력"),
+            "sort_order": st.column_config.NumberColumn("sort_order", step=1, help="목록 정렬 (작을수록 위)"),
+        },
     )
 
-    if st.button("일괄 저장", type="primary", use_container_width=True, key="curriculum_bulk_save"):
+    if st.button("일괄 저장", type="primary", use_container_width=True, key="curriculum_bulk_save_v2"):
         if edited is None or edited.empty:
             st.error("저장할 데이터가 없습니다.")
             return
-        required = _base_columns()
-        for col in required:
+        for col in COURSE_COLUMNS:
             if col not in edited.columns:
-                edited[col] = ""
-        edited = edited[required].copy()
-        edited["id"] = edited["id"].astype(str).str.strip()
-        edited["category"] = edited["category"].astype(str).str.strip()
-        edited["title"] = edited["title"].astype(str).str.strip()
-        edited["content"] = edited["content"].astype(str).str.strip()
-        edited["sort_order"] = pd.to_numeric(edited["sort_order"], errors="coerce").fillna(0).astype(int)
+                edited[col] = "" if col in ("course_id", "course_name", "description", "created_at") else 0
+        edited = edited[COURSE_COLUMNS].copy()
+        edited["course_id"] = edited["course_id"].astype(str).str.strip()
+        edited["course_name"] = edited["course_name"].astype(str).str.strip()
+        edited["description"] = edited["description"].astype(str)
         edited["created_at"] = edited["created_at"].astype(str).str.strip()
+        edited["sessions"] = pd.to_numeric(edited["sessions"], errors="coerce").fillna(0).astype(int)
+        edited["amount"] = pd.to_numeric(edited["amount"], errors="coerce").fillna(0).astype(int)
+        edited["sort_order"] = pd.to_numeric(edited["sort_order"], errors="coerce").fillna(0).astype(int)
 
-        # 신규 행에서 id가 비어 있으면 자동 발급
-        empty_id_mask = edited["id"] == ""
+        if (edited["course_name"] == "").any():
+            st.error("course_name은 비울 수 없습니다.")
+            return
+
+        dup_mask = edited["course_id"] != ""
+        dup_ids = edited.loc[dup_mask, "course_id"]
+        if dup_ids.duplicated().any():
+            st.error("course_id가 중복되었습니다. 각 코스마다 다른 ID를 사용하세요.")
+            return
+
+        now_txt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        empty_id_mask = edited["course_id"] == ""
         if empty_id_mask.any():
             for i in edited[empty_id_mask].index:
-                edited.at[i, "id"] = f"cur_{datetime.now().strftime('%Y%m%d%H%M%S%f')}_{i}"
+                edited.at[i, "course_id"] = f"course_{datetime.now().strftime('%Y%m%d%H%M%S%f')}_{i}"
                 if not edited.at[i, "created_at"]:
-                    edited.at[i, "created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    edited.at[i, "created_at"] = now_txt
 
+        edited = _coerce_course_df(edited)
         _safe_update(conn, worksheet=WORKSHEET_NAME, data=edited)
         _mark_curriculum_dirty()
         st.success("일괄 수정 내용이 저장되었습니다.")
         st.rerun()
 
 
-def get_course_options(force_refresh=False):
-    """원생 등록에서 사용할 코스 목록을 curriculum 시트에서 가져옵니다."""
-    _, df = _load_curriculum(ttl=0 if force_refresh else 60)
+def _fallback_course_options():
+    return ["정규반(주1회)", "정규반(주2회)", "원데이 클래스", "기타"]
+
+
+def _course_options_from_df(df):
     if df is None or df.empty:
-        return ["정규반(주1회)", "정규반(주2회)", "원데이 클래스", "기타"]
-
-    course_df = df[df["category"] == "코스"].copy()
-    if course_df.empty:
-        return ["정규반(주1회)", "정규반(주2회)", "원데이 클래스", "기타"]
-
-    course_df["sort_order"] = pd.to_numeric(course_df["sort_order"], errors="coerce").fillna(9999).astype(int)
-    course_df = course_df.sort_values(by=["sort_order", "created_at"], ascending=[True, True])
-    options = [str(x).strip() for x in course_df["title"].tolist() if str(x).strip()]
+        return _fallback_course_options()
+    work = _coerce_course_df(df)
+    work = work.sort_values(by=["sort_order", "created_at", "course_id"], ascending=[True, True, True])
+    options, seen = [], set()
+    for x in work["course_name"].tolist():
+        name = str(x).strip()
+        if name and name not in seen:
+            seen.add(name)
+            options.append(name)
     if "기타" not in options:
         options.append("기타")
     return options if options else ["기타"]
 
 
-def get_course_price_map(force_refresh=False):
-    """코스별 금액 맵 반환 (content에서 숫자 금액 파싱)"""
-    _, df = _load_curriculum(ttl=0 if force_refresh else 60)
+def _price_map_from_df(df):
     if df is None or df.empty:
         return {}
-    cdf = df[df["category"] == "코스"].copy()
-    if cdf.empty:
+    out = {}
+    for _, row in _coerce_course_df(df).iterrows():
+        name = str(row.get("course_name", "")).strip()
+        if not name:
+            continue
+        out[name] = int(row.get("amount", 0) or 0)
+    return out
+
+
+def _sessions_map_from_df(df):
+    if df is None or df.empty:
         return {}
     out = {}
-    for _, row in cdf.iterrows():
-        title = str(row.get("title", "")).strip()
-        content = str(row.get("content", "")).strip()
-        if not title:
+    for _, row in _coerce_course_df(df).iterrows():
+        name = str(row.get("course_name", "")).strip()
+        if not name:
             continue
-        # content 내 첫 금액 추출 (예: 180,000원)
-        m = re.search(r"([0-9][0-9,]*)\s*원", content)
-        if m:
-            out[title] = int(m.group(1).replace(",", ""))
-        else:
-            out[title] = 0
+        out[name] = int(row.get("sessions", 0) or 0)
     return out
+
+
+def get_registration_curriculum_bundle():
+    """신규 등록 화면용: 커리큘럼 시트를 한 번만 읽어 목록·금액·횟수 맵을 맞춤."""
+    _, df = _load_curriculum(60)
+    return {
+        "options": _course_options_from_df(df),
+        "price_map": _price_map_from_df(df),
+        "sessions_map": _sessions_map_from_df(df),
+    }
+
+
+def get_course_options(force_refresh=False):
+    """원생 등록에서 사용할 코스 목록 (course_name)."""
+    _, df = _load_curriculum(0 if force_refresh else 60)
+    return _course_options_from_df(df)
+
+
+def get_course_price_map(force_refresh=False):
+    """course_name -> amount(원)."""
+    _, df = _load_curriculum(0 if force_refresh else 60)
+    return _price_map_from_df(df)
+
+
+def get_course_sessions_map(force_refresh=False):
+    """course_name -> 권장 횟수(sessions)."""
+    _, df = _load_curriculum(0 if force_refresh else 60)
+    return _sessions_map_from_df(df)

@@ -223,19 +223,38 @@ def render_intro_branch():
             s_path = assets / s_name
             if s_path.exists():
                 s_b64 = base64.b64encode(s_path.read_bytes()).decode("ascii")
-                student_bg = f"url('data:image/png;base64,{s_b64}') center / contain no-repeat"
+                student_bg = f"url('data:image/png;base64,{s_b64}') center center / cover no-repeat"
                 break
         for t_name in ("teacher_bt.png", "teacher_bt.PNG"):
             t_path = assets / t_name
             if t_path.exists():
                 t_b64 = base64.b64encode(t_path.read_bytes()).decode("ascii")
-                teacher_bg = f"url('data:image/png;base64,{t_b64}') center / contain no-repeat"
+                teacher_bg = f"url('data:image/png;base64,{t_b64}') center center / cover no-repeat"
                 break
     except Exception:
         pass
 
     css = """
         <style>
+        .st-key-intro-center-wrap {
+            min-height: calc(100dvh - 4.2rem) !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            width: 100% !important;
+        }
+        .st-key-intro-center-wrap > div[data-testid="stVerticalBlock"] {
+            width: min(560px, 96vw) !important;
+            margin: 0 auto !important;
+        }
+        @media (max-width: 768px) {
+            .st-key-intro-center-wrap {
+                min-height: calc(100dvh - 3.2rem) !important;
+            }
+            .st-key-intro-center-wrap > div[data-testid="stVerticalBlock"] {
+                width: min(520px, 96vw) !important;
+            }
+        }
         .home-welcome-card {
             border: 1px solid #B78F6A;
             border-radius: 16px;
@@ -280,7 +299,10 @@ def render_intro_branch():
             appearance: none !important;
             padding: 0 !important;
             margin: 0 !important;
-            /* 두 버튼 세로 크기 동일 (이미지 원본 높이 차이와 무관) */
+            width: 100% !important;
+            max-width: 100% !important;
+            box-sizing: border-box !important;
+            /* 두 버튼 동일 박스 + cover로 이미지 비율 차이 최소화 */
             min-height: 112px !important;
             height: 112px !important;
             max-height: 112px !important;
@@ -353,27 +375,33 @@ def render_intro_branch():
             filter: brightness(0.93) !important;
         }
         </style>
-        <div class="home-welcome-card">
-            <p class="home-welcome-title">작업실 그리다가</p>
-            <p class="home-welcome-sub">오늘도 반가워요. 아래에서 사용자 유형을 선택해 주세요.</p>
-        </div>
     """
     st.markdown(
         css.replace("__STUDENT_BG__", student_bg).replace("__TEACHER_BG__", teacher_bg),
         unsafe_allow_html=True,
     )
-    if st.button("🎓 원생용", use_container_width=True, key="entry_student"):
-        st.session_state["entry_mode"] = "student"
-        st.query_params["mode"] = "student"
-        st.query_params.pop("owner_login_at", None)
-        st.session_state["student_id_input"] = ""
-        st.session_state["student_message"] = ""
-        st.session_state["student_message_type"] = ""
-        st.rerun()
-    if st.button("🧑‍🏫 선생님", use_container_width=True, key="entry_owner"):
-        st.session_state["entry_mode"] = "owner"
-        st.query_params["mode"] = "owner"
-        st.rerun()
+    with st.container(key="intro-center-wrap"):
+        st.markdown(
+            """
+            <div class="home-welcome-card">
+                <p class="home-welcome-title">작업실 그리다가</p>
+                <p class="home-welcome-sub">오늘도 반가워요. 아래에서 사용자 유형을 선택해 주세요.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if st.button("🎓 원생용", use_container_width=True, key="entry_student"):
+            st.session_state["entry_mode"] = "student"
+            st.query_params["mode"] = "student"
+            st.query_params.pop("owner_login_at", None)
+            st.session_state["student_id_input"] = ""
+            st.session_state["student_message"] = ""
+            st.session_state["student_message_type"] = ""
+            st.rerun()
+        if st.button("🧑‍🏫 선생님", use_container_width=True, key="entry_owner"):
+            st.session_state["entry_mode"] = "owner"
+            st.query_params["mode"] = "owner"
+            st.rerun()
 
     components.html(
         """

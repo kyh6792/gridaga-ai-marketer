@@ -529,14 +529,26 @@ def apply_owner_dashboard_style():
         .st-key-owner_menu_bar [data-testid="stVerticalBlock"] {
             gap: 0.2rem !important;
         }
-        /* 패널: 본문 박스 높이가 아니라 뷰포트 기준으로 동일 타일(과확대 방지) */
+        /* 패널(익스팬더/탭/컨테이너): fixed 배경은 접힘/펼침 때 리페인트가 커져 끊김·잔상(고스팅)을 유발할 수 있음.
+           캔버스(.stApp)만 fixed로 두고, 패널은 스크롤 배경 + 반투명 톤으로 안정화. */
         [data-testid="stExpander"],
         [data-testid="stTabs"] [data-baseweb="tab-panel"],
         [data-testid="stVerticalBlockBorderWrapper"] {
-            background-attachment: fixed !important;
-            background-size: 100% 100% !important;
+            background-attachment: scroll !important;
+            background-size: auto !important;
             background-position: center center !important;
-            background-repeat: no-repeat !important;
+            background-repeat: repeat !important;
+            /* GPU 레이어 분리로 잔상 완화(특히 Windows/Chrome에서) */
+            transform: translateZ(0);
+            backface-visibility: hidden;
+            will-change: contents;
+        }
+        [data-testid="stExpander"] {
+            background: rgba(232, 212, 190, 0.82) !important;
+        }
+        [data-testid="stTabs"] [data-baseweb="tab-panel"],
+        [data-testid="stVerticalBlockBorderWrapper"] {
+            background: rgba(232, 212, 190, 0.74) !important;
         }
         /* 재무 등 하단 st.tabs — 기본 흰 박스 대신 대시보드 톤 */
         [data-testid="stTabs"] {

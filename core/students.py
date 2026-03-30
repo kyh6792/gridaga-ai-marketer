@@ -2,6 +2,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
 from datetime import datetime
+import html
 import time
 import base64
 import re
@@ -238,7 +239,7 @@ def _fast_batch_write_for_approvals(
         return False
 
 def run_student_ui():
-    from core.curriculum import get_course_options, get_course_price_map
+    from core.curriculum import get_course_options, get_registration_curriculum_bundle
     from core.schedule import run_schedule_ui
 
     st.subheader("👥 회원 관리")
@@ -250,20 +251,26 @@ def run_student_ui():
         else:
             st.error(str(msg))
 
-    def _suggest_sessions(course_name):
+    def _suggest_sessions(course_name, sessions_map):
+        smap = sessions_map or {}
+        c = str(course_name).strip()
+        if c in smap and int(smap[c] or 0) > 0:
+            return int(smap[c])
+        for k, v in smap.items():
+            if int(v or 0) > 0 and (str(k) in c or c in str(k)):
+                return int(v)
         course_text = str(course_name).upper()
-        if "코스 A".upper() in course_text:
+        if "코스 A" in course_text:
             return 4
-        if "코스 B".upper() in course_text:
+        if "코스 B" in course_text:
             return 8
         return 10
 
-    def _resolve_course_price(course_name):
-        # 코스/금액이 시트에서 바뀌면 즉시 반영
-        price_map = get_course_price_map(force_refresh=False)
-        if course_name in price_map:
-            return int(price_map[course_name] or 0)
-        for k, v in price_map.items():
+    def _resolve_course_price(course_name, price_map):
+        pmap = price_map or {}
+        if course_name in pmap:
+            return int(pmap[course_name] or 0)
+        for k, v in pmap.items():
             if str(k) in str(course_name) or str(course_name) in str(k):
                 return int(v or 0)
         return 0
@@ -279,34 +286,41 @@ def run_student_ui():
 
         if student_section == "📝 신규 등록":
             st.write("새로운 수강생 정보를 입력해주세요.")
-            # 코스/할인/금액이 선택 즉시 반영되도록 form 대신 일반 위젯 사용
-            course_options = get_course_options(force_refresh=False)
+            # 커리큘럼 시트 1회 조회로 코스·금액·횟수 일치 (저장 직후 플래그 시 최신 반영)
+            reg_bundle = get_registration_curriculum_bundle()
+            course_options = reg_bundle["options"]
+            price_map = reg_bundle["price_map"]
+            sessions_map = reg_bundle["sessions_map"]
             if "student_reg_course_prev" not in st.session_state:
                 st.session_state["student_reg_course_prev"] = ""
-            if "student_reg_total_prev" not in st.session_state:
-                st.session_state["student_reg_total_prev"] = 10
 
             name = st.text_input("이름", placeholder="이름을 입력하세요", key="student_reg_name")
             contact = st.text_input("연락처", placeholder="010-0000-0000", key="student_reg_contact")
             course = st.selectbox("수강 코스", course_options, key="student_reg_course")
-            suggested_sessions = _suggest_sessions(course)
+            suggested_sessions = _suggest_sessions(course, sessions_map)
             st.markdown("**결제 정보**")
 
             prev_course = st.session_state.get("student_reg_course_prev", "")
-            prev_total = int(st.session_state.get("student_reg_total_prev", 10))
-            default_total = prev_total
-            if (not prev_course) or (course != prev_course and prev_total == _suggest_sessions(prev_course)):
-                default_total = suggested_sessions
+            seen = st.session_state.setdefault("student_reg_seen_sessions", {})
+            last_s = seen.get(course)
+            seen[course] = suggested_sessions
+            if last_s is not None and int(last_s) != int(suggested_sessions):
+                st.session_state["student_reg_total_input"] = max(1, int(suggested_sessions))
+            if prev_course != course:
+                st.session_state["student_reg_total_input"] = max(1, int(suggested_sessions))
+            if "student_reg_total_input" not in st.session_state:
+                st.session_state["student_reg_total_input"] = max(1, int(suggested_sessions))
 
             total_sessions = st.number_input(
                 "결제 횟수 (횟수제)",
                 min_value=1,
-                value=int(default_total),
                 key="student_reg_total_input",
             )
-            st.caption(f"추천 횟수: {suggested_sessions}회 (코스 기준, 직접 수정 가능)")
+            st.caption(
+                f"추천 횟수: {suggested_sessions}회 (커리큘럼 `sessions` 기준, 시트 수정 후 이 화면을 열면 반영)"
+            )
 
-            base_amount = int(_resolve_course_price(course))
+            base_amount = int(_resolve_course_price(course, price_map))
             discount_type = st.selectbox(
                 "할인 유형",
                 ["없음", "정액 할인", "정률 할인(%)", "이벤트가 직접입력"],
@@ -342,7 +356,6 @@ def run_student_ui():
             )
 
             st.session_state["student_reg_course_prev"] = course
-            st.session_state["student_reg_total_prev"] = int(total_sessions)
 
             reg_date = st.date_input("등록일", value=datetime.now(), key="student_reg_date")
             memo = st.text_area("특이사항 및 메모", key="student_reg_memo")
@@ -555,6 +568,28 @@ def generate_student_id(df):
     # 가장 큰 번호를 찾아 +1
     last_id = int(max(same_year_ids))
     return str(last_id + 1)
+
+
+def _clear_student_registration_widgets():
+    """신규 등록 저장 후 이중 등록 방지 — 관련 위젯·보조 세션 초기화."""
+    for k in (
+        "student_reg_name",
+        "student_reg_contact",
+        "student_reg_course",
+        "student_reg_total_input",
+        "student_reg_discount_type",
+        "student_reg_discount_fixed",
+        "student_reg_discount_rate",
+        "student_reg_event_name",
+        "student_reg_final_amount",
+        "student_reg_date",
+        "student_reg_memo",
+        "student_reg_course_prev",
+    ):
+        st.session_state.pop(k, None)
+    st.session_state.pop("student_reg_seen_sessions", None)
+
+
 def save_student_to_sheet(
     name,
     contact,
@@ -665,6 +700,8 @@ def save_student_to_sheet(
             discount_amount=discount_amount,
             event_name=event_name,
         )
+        _clear_student_registration_widgets()
+        st.rerun()
 
     except Exception as e:
         st.error(f"등록 중 에러 발생: {e}")
@@ -863,20 +900,52 @@ def display_student_list(show_mode="list"):
             # 3. 카드형 리스트 출력
             for _, row in display_df.iterrows():
                 stu_status = str(row["상태"]).strip() if pd.notna(row["상태"]) else "재원"
-                status_color = "green" if stu_status == "재원" else "gray"
                 reg_kind = reg_event_map.get(str(row["ID"]), "")
                 reg_badge = " · 🆕 등록" if reg_kind == "등록" else (" · 🔁 재등록" if reg_kind == "재등록" else "")
                 
                 # 카드 테두리 시작
                 with st.container(border=True):
-                    # [26001] 이름 (상태배지)
-                    st.markdown(f"### `{row['ID']}` **{row['이름']}** :{status_color}[[{stu_status}]]")
-                    st.caption(f"🎨 {row['수강코스']} | 📱 {row['연락처']}{reg_badge}")
+                    rem_count = int(row["잔여 횟수"])
+                    if rem_count <= 0:
+                        count_hex = "#c62828"
+                    elif rem_count <= 2:
+                        count_hex = "#e65100"
+                    else:
+                        count_hex = "#2e7d32"
 
-                    # 잔여 횟수
-                    rem_count = int(row['잔여 횟수'])
-                    count_style = "normal" if rem_count > 2 else "inverse"
-                    st.metric("잔여 횟수", f"{rem_count}회", delta_color=count_style)
+                    # st.columns 대신 flex + nowrap: 좁은 화면에서도 잔여 박스가 아래로 떨어지지 않음
+                    id_e = html.escape(str(row["ID"]).strip())
+                    name_e = html.escape(str(row["이름"]).strip() if pd.notna(row["이름"]) else "")
+                    course_e = html.escape(str(row["수강코스"]).strip() if pd.notna(row.get("수강코스")) else "")
+                    contact_e = html.escape(str(row["연락처"]).strip() if pd.notna(row.get("연락처")) else "")
+                    stu_e = html.escape(stu_status)
+                    status_hex = "#2e7d32" if stu_status == "재원" else "#757575"
+                    st.markdown(
+                        f'<div style="display:flex;flex-flow:row nowrap;align-items:flex-start;gap:0.5rem;'
+                        f'width:100%;box-sizing:border-box;">'
+                        f'<div style="flex:1 1 0%;min-width:0;overflow-wrap:anywhere;word-break:break-word;">'
+                        f'<div style="margin:0;padding:0;font-size:1.25rem;line-height:1.35;font-weight:700;color:#31333F;">'
+                        f'<span style="display:inline-block;background:#fff;padding:0.1rem 0.45rem;border-radius:6px;'
+                        f'font-size:0.88rem;font-weight:700;color:#2e7d32;border:1px solid rgba(46,125,50,0.35);">{id_e}</span> '
+                        f'<span style="font-weight:800;">{name_e}</span> '
+                        f'<span style="color:{status_hex};font-weight:700;">[{stu_e}]</span>'
+                        f"</div>"
+                        f'<div style="font-size:0.82rem;color:#666;margin-top:0.28rem;line-height:1.35;">'
+                        f"🎨 {course_e} | 📱 {contact_e}{html.escape(reg_badge)}"
+                        f"</div></div>"
+                        f'<div style="flex:0 0 auto;width:4.35rem;max-width:22%;flex-shrink:0;">'
+                        f'<div style="display:flex;align-items:center;justify-content:center;min-height:3.85rem;">'
+                        f'<div style="width:100%;text-align:center;'
+                        f"border:1.5px solid rgba(140,118,92,0.42);border-radius:10px;"
+                        f"background:rgba(255,252,246,0.94);padding:7px 3px 9px;box-sizing:border-box;"
+                        f"box-shadow:0 1px 4px rgba(72,52,32,0.07);\">"
+                        f'<div style="font-size:0.62rem;color:#5c4d3f;font-weight:600;letter-spacing:0.03em;">잔여</div>'
+                        f'<div style="line-height:1;margin-top:2px;">'
+                        f'<span style="font-size:clamp(1.15rem,4.2vw,1.75rem);font-weight:800;color:{count_hex};">{rem_count}</span>'
+                        f'<span style="font-size:clamp(0.7rem,2.8vw,0.92rem);font-weight:700;color:{count_hex};">회</span>'
+                        f"</div></div></div></div></div>",
+                        unsafe_allow_html=True,
+                    )
 
                     if show_mode != "edit":
                         with st.expander("재원 · 휴원 · 퇴원 설정", expanded=False):

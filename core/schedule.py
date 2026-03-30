@@ -267,51 +267,71 @@ def _render_schedule_create(conn, df):
         label = f"{row['이름']} ({row['ID']})"
         student_options.append((label, str(row["ID"]), str(row["이름"])))
 
-    with st.form("schedule_create_form", clear_on_submit=True):
-        c1, c2 = st.columns(2)
-        with c1:
-            selected_label = st.selectbox("원생 선택", [x[0] for x in student_options])
-            selected = next((x for x in student_options if x[0] == selected_label), None)
-            student_id = selected[1] if selected else ""
-            student_name = selected[2] if selected else ""
-            weekday = st.selectbox("요일", WEEKDAY_ORDER)
-        with c2:
-            time_options = TIME_SLOTS_BY_WEEKDAY.get(weekday, ["10:30~13:00"])
-            time_slot = st.selectbox("시간대", time_options)
-            start_date = st.text_input("시작일", placeholder="예: 2026-03-01")
-            end_date = st.text_input("종료일", placeholder="예: 2026-12-31 (선택)")
-        memo = st.text_area("메모", placeholder="예: 정규반 코스 A")
-        submitted = st.form_submit_button("일정 등록", use_container_width=True)
-        if submitted:
-            if not student_name.strip() or not student_id.strip() or not time_slot.strip():
-                st.error("원생 이름, ID, 시간대는 필수입니다.")
-                return
+    def _on_schedule_weekday_change():
+        st.session_state.pop("schedule_create_time_slot", None)
 
-            # 동일 요일/시간대 정원 4명 체크
-            active_same = df[
-                (df["weekday"].astype(str) == weekday)
-                & (df["time_slot"].astype(str) == time_slot)
-            ]
-            if len(active_same) >= MAX_STUDENTS_PER_SLOT:
-                st.error(f"{weekday} {time_slot} 시간대는 정원 {MAX_STUDENTS_PER_SLOT}명입니다.")
-                return
+    # 예전 폼과 동일 순서: 좌 — 원생·요일 / 우 — 시간대·시작일·종료일 → 메모 → 등록
+    c1, c2 = st.columns(2)
+    with c1:
+        selected_label = st.selectbox(
+            "원생 선택",
+            [x[0] for x in student_options],
+            key="schedule_create_student_label",
+        )
+        selected = next((x for x in student_options if x[0] == selected_label), None)
+        student_id = selected[1] if selected else ""
+        student_name = selected[2] if selected else ""
+        weekday = st.selectbox(
+            "요일",
+            WEEKDAY_ORDER,
+            key="schedule_create_weekday",
+            on_change=_on_schedule_weekday_change,
+        )
+    with c2:
+        time_options = TIME_SLOTS_BY_WEEKDAY.get(weekday, ["10:30~13:00"])
+        time_slot = st.selectbox("시간대", time_options, key="schedule_create_time_slot")
+        start_date = st.text_input("시작일", placeholder="예: 2026-03-01", key="schedule_create_start")
+        end_date = st.text_input("종료일", placeholder="예: 2026-12-31 (선택)", key="schedule_create_end")
+    memo = st.text_area("메모", placeholder="예: 정규반 코스 A", key="schedule_create_memo")
 
-            new_row = pd.DataFrame([{
-                "id": f"sch_{datetime.now().strftime('%Y%m%d%H%M%S%f')}",
-                "student_id": student_id.strip(),
-                "student_name": student_name.strip(),
-                "weekday": weekday,
-                "time_slot": time_slot.strip(),
-                "start_date": start_date.strip(),
-                "end_date": end_date.strip(),
-                "memo": memo.strip(),
-                "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            }])
-            updated = pd.concat([df, new_row], ignore_index=True) if not df.empty else new_row
-            _safe_update(conn, worksheet=WORKSHEET_NAME, data=updated)
-            _mark_schedule_dirty()
-            st.success("시간표가 등록되었습니다.")
-            st.rerun()
+    if st.button("일정 등록", type="primary", use_container_width=True, key="schedule_create_submit"):
+        if not student_name.strip() or not student_id.strip() or not str(time_slot).strip():
+            st.error("원생 이름, ID, 시간대는 필수입니다.")
+            return
+
+        active_same = df[
+            (df["weekday"].astype(str) == weekday)
+            & (df["time_slot"].astype(str) == time_slot)
+        ]
+        if len(active_same) >= MAX_STUDENTS_PER_SLOT:
+            st.error(f"{weekday} {time_slot} 시간대는 정원 {MAX_STUDENTS_PER_SLOT}명입니다.")
+            return
+
+        new_row = pd.DataFrame([{
+            "id": f"sch_{datetime.now().strftime('%Y%m%d%H%M%S%f')}",
+            "student_id": student_id.strip(),
+            "student_name": student_name.strip(),
+            "weekday": weekday,
+            "time_slot": str(time_slot).strip(),
+            "start_date": str(start_date).strip(),
+            "end_date": str(end_date).strip(),
+            "memo": str(memo).strip(),
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }])
+        updated = pd.concat([df, new_row], ignore_index=True) if not df.empty else new_row
+        _safe_update(conn, worksheet=WORKSHEET_NAME, data=updated)
+        _mark_schedule_dirty()
+        for k in (
+            "schedule_create_student_label",
+            "schedule_create_weekday",
+            "schedule_create_time_slot",
+            "schedule_create_start",
+            "schedule_create_end",
+            "schedule_create_memo",
+        ):
+            st.session_state.pop(k, None)
+        st.success("시간표가 등록되었습니다.")
+        st.rerun()
 
 
 def _render_schedule_delete(conn, df):
