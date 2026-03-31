@@ -6,6 +6,7 @@ import base64
 from pathlib import Path
 import pandas as pd
 from core.perf import perf_log, perf_enabled, perf_recent_top
+import time
 
 # 배포본 core/ui.py 버전이 달라도 ImportError 나지 않게 모듈 단위로 로드
 import core.ui as _ui
@@ -90,38 +91,47 @@ retry_failed_log_request = getattr(
     lambda *args, **kwargs: (False, "로그 재시도 기능을 불러오지 못했습니다."),
 )
 from core.schedule import get_today_schedule_by_student
+_t_boot0 = time.perf_counter()
+
 # --- 1. 페이지 설정 ---
 st.set_page_config(
     page_title="작업실 그리다가 OS", 
     page_icon="🎨", 
     layout="centered" # 모바일은 wide보다 centered가 가독성이 좋습니다.
 )
+perf_log("boot.set_page_config", (time.perf_counter() - _t_boot0) * 1000.0)
 _inject_chrome = getattr(_ui, "inject_global_streamlit_chrome_hide", None)
 if callable(_inject_chrome):
+    _t = time.perf_counter()
     _inject_chrome()
+    perf_log("boot.inject_chrome_hide", (time.perf_counter() - _t) * 1000.0)
 else:
     _css = getattr(_ui, "STREAMLIT_CHROME_HIDE_CSS", None)
     if _css:
+        _t = time.perf_counter()
         st.markdown(f"<style>{_css}</style>", unsafe_allow_html=True)
+        perf_log("boot.inject_css_hide", (time.perf_counter() - _t) * 1000.0)
     else:
+        _t = time.perf_counter()
         st.markdown(
             '<style>[data-testid="stStatusWidget"]{display:none!important;}</style>',
             unsafe_allow_html=True,
         )
+        perf_log("boot.inject_css_hide_fallback", (time.perf_counter() - _t) * 1000.0)
 
 # Google Drive OAuth 콜백 (?code= / ?state=) — 인트로보다 먼저 처리
 from core import drive_oauth
 
+_t = time.perf_counter()
 drive_oauth.try_finish_google_drive_oauth()
+perf_log("boot.try_finish_drive_oauth", (time.perf_counter() - _t) * 1000.0)
 
-# --- 2. 인트로 화면 실행 ---
-# mode가 없는 진입 화면에서만 세션당 1회 재생 (skip_intro 쿼리 의존 제거)
+# --- 2. 인트로 화면(스플래시) 제거 ---
+# 첫 화면(원생용/선생님 선택) 안에서 로고+문구를 보여주므로, 별도 인트로 재생은 하지 않음.
+_t = time.perf_counter()
 qp_mode_for_intro = str(st.query_params.get("mode", ""))
-if qp_mode_for_intro not in ("student", "owner"):
-    display_intro("intro/logo.jpg", duration=1.5)
-else:
-    # URL로 바로 진입(student/owner)한 경우도 메인 렌더는 진행되어야 함
-    st.session_state["intro_done"] = True
+perf_log("boot.read_query_params_mode", (time.perf_counter() - _t) * 1000.0)
+st.session_state["intro_done"] = True
 
 def init_entry_state():
     defaults = {
@@ -211,6 +221,14 @@ def sync_owner_session_from_query():
 
 
 def render_intro_branch():
+    # 첫 화면에서도 캔버스 배경/폰트 테마 적용(기존 스플래시 인트로에서 하던 역할)
+    try:
+        _set = getattr(_ui, "set_custom_style", None)
+        if callable(_set):
+            _set()
+    except Exception:
+        pass
+
     # 이미지가 있을 때: 뒤 레이어 없음 → PNG 투명 부분이 앱 캔버스 배경을 비춤 (베이지 박스 금지)
     student_fallback = "linear-gradient(120deg, #C09066 0%, #B47F57 55%, #A86E48 100%)"
     teacher_fallback = "linear-gradient(120deg, #9E6B43 0%, #8E5F3D 58%, #7E5233 100%)"
@@ -242,18 +260,35 @@ def render_intro_branch():
             align-items: center !important;
             justify-content: center !important;
             width: 100% !important;
+            padding-top: 1.1rem !important; /* 전체를 살짝 아래로 */
         }
         .st-key-intro-center-wrap > div[data-testid="stVerticalBlock"] {
             width: min(560px, 96vw) !important;
             margin: 0 auto !important;
+            transform: translateY(10px);
+        }
+        /* intro 내부 요소 가운데 정렬 */
+        .st-key-intro-center-wrap [data-testid="stImage"] {
+            display: flex !important;
+            justify-content: center !important;
+        }
+        .st-key-intro-center-wrap [data-testid="stImage"] > div {
+            margin-left: auto !important;
+            margin-right: auto !important;
         }
         @media (max-width: 768px) {
             .st-key-intro-center-wrap {
                 min-height: calc(100dvh - 3.2rem) !important;
+                padding-top: 0.9rem !important;
             }
             .st-key-intro-center-wrap > div[data-testid="stVerticalBlock"] {
                 width: min(520px, 96vw) !important;
+                transform: translateY(8px);
             }
+        }
+        /* 로고는 st.image로 렌더링 — 깨진 아이콘(가짜 img) 방지 */
+        [data-testid="stImage"] img {
+            filter: drop-shadow(0 4px 10px rgba(50, 34, 22, 0.18));
         }
         .home-welcome-card {
             border: 1px solid #B78F6A;
@@ -302,11 +337,11 @@ def render_intro_branch():
             width: 100% !important;
             max-width: 100% !important;
             box-sizing: border-box !important;
-            /* 두 버튼 동일 박스(기존 대비 약 2/3 크기) */
-            min-height: 75px !important;
-            height: 75px !important;
-            max-height: 75px !important;
-            border-radius: 16px !important;
+            /* 두 버튼 동일 박스(현재 대비 1/2) */
+            min-height: 38px !important;
+            height: 38px !important;
+            max-height: 38px !important;
+            border-radius: 12px !important;
             /* hidden 켜면 투명 영역이 잘려 캔버스가 안 보일 수 있음 */
             overflow: visible !important;
             transition: transform 120ms ease, filter 120ms ease !important;
@@ -354,7 +389,7 @@ def render_intro_branch():
             white-space: normal !important;
             border: 0 !important;
             color: #FFF8F0 !important;
-            font-size: 1.22rem !important;
+            font-size: 1.02rem !important;
             font-weight: 800 !important;
             line-height: 1.25 !important;
             letter-spacing: -0.02em !important;
@@ -381,6 +416,15 @@ def render_intro_branch():
         unsafe_allow_html=True,
     )
     with st.container(key="intro-center-wrap"):
+        # 로고 + 태그라인 (항상 중앙)
+        try:
+            st.image("intro/logo.jpg", width=260)
+        except Exception:
+            pass
+        st.markdown(
+            '<p class="intro-tagline">나만의 채색으로 채우는 시간</p>',
+            unsafe_allow_html=True,
+        )
         st.markdown(
             """
             <div class="home-welcome-card">
@@ -390,7 +434,7 @@ def render_intro_branch():
             """,
             unsafe_allow_html=True,
         )
-        if st.button("🎓 원생용", use_container_width=True, key="entry_student"):
+        if st.button("원생용", use_container_width=True, key="entry_student"):
             st.session_state["entry_mode"] = "student"
             st.query_params["mode"] = "student"
             st.query_params.pop("owner_login_at", None)
@@ -398,7 +442,7 @@ def render_intro_branch():
             st.session_state["student_message"] = ""
             st.session_state["student_message_type"] = ""
             st.rerun()
-        if st.button("🧑‍🏫 선생님", use_container_width=True, key="entry_owner"):
+        if st.button("선생님", use_container_width=True, key="entry_owner"):
             st.session_state["entry_mode"] = "owner"
             st.query_params["mode"] = "owner"
             st.rerun()
@@ -445,9 +489,10 @@ def render_student_entry():
         div[data-testid="stButton"] > button {
             width: 100% !important;
             box-sizing: border-box !important;
-            padding: 0.34rem 0.18rem !important;
-            min-height: 40px !important;
-            font-size: 0.9rem !important;
+            padding: 0.3rem 0.14rem !important;
+            min-height: 107px !important;
+            font-size: 1.57rem !important;
+            font-weight: 700 !important;
         }
         /* Streamlit 모바일 자동 스택 방지: 키패드 3열 강제 유지 */
         div[data-testid="stHorizontalBlock"] {
@@ -466,9 +511,10 @@ def render_student_entry():
         /* 세로 모드(좁은 폭)에서 추가 축소 */
         @media (max-width: 480px) {
             div[data-testid="stButton"] > button {
-                padding: 0.26rem 0.06rem !important;
-                min-height: 34px !important;
-                font-size: 0.8rem !important;
+                padding: 0.21rem 0.05rem !important;
+                min-height: 91px !important;
+                font-size: 1.33rem !important;
+                font-weight: 700 !important;
             }
             div[data-testid="stHorizontalBlock"] {
                 gap: 0.14rem !important;
@@ -735,10 +781,15 @@ def render_owner_menu():
 
 
 if st.session_state.get('intro_done'):
+    _t = time.perf_counter()
     init_entry_state()
+    perf_log("boot.init_entry_state", (time.perf_counter() - _t) * 1000.0)
+    _t = time.perf_counter()
     sync_owner_session_from_query()
+    perf_log("boot.sync_owner_session", (time.perf_counter() - _t) * 1000.0)
     # F5 복원: owner 모드 + Google 세션 유효하면 원장 세션을 먼저 복구
     try:
+        _t = time.perf_counter()
         if (
             str(st.query_params.get("mode", "")) == "owner"
             and drive_oauth.oauth_google_drive_configured()
@@ -750,6 +801,7 @@ if st.session_state.get('intro_done'):
             if not st.session_state.get("owner_login_at"):
                 st.session_state["owner_login_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             st.query_params["owner_login_at"] = st.session_state["owner_login_at"]
+        perf_log("boot.owner_google_session_restore", (time.perf_counter() - _t) * 1000.0)
     except Exception:
         pass
     # 원장 세션 1시간 만료 처리
@@ -780,16 +832,26 @@ if st.session_state.get('intro_done'):
 
     mode = st.session_state.get("entry_mode")
     if mode is None:
+        _t = time.perf_counter()
         render_intro_branch()
+        perf_log("boot.render_intro_branch", (time.perf_counter() - _t) * 1000.0)
     elif mode == "student":
         st.query_params["mode"] = "student"
+        _t = time.perf_counter()
         render_student_entry()
+        perf_log("boot.render_student_entry", (time.perf_counter() - _t) * 1000.0)
     elif mode == "owner":
         st.query_params["mode"] = "owner"
         if st.session_state.get("owner_authenticated"):
+            _t = time.perf_counter()
             render_owner_menu()
+            perf_log("boot.render_owner_menu", (time.perf_counter() - _t) * 1000.0)
         else:
+            _t = time.perf_counter()
             render_owner_auth()
+            perf_log("boot.render_owner_auth", (time.perf_counter() - _t) * 1000.0)
+
+    perf_log("boot.total", (time.perf_counter() - _t_boot0) * 1000.0)
 
 # --- 4. 푸터 ---
 if st.session_state.get('intro_done'):

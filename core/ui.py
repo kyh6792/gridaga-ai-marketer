@@ -266,9 +266,10 @@ def display_intro(image_path, duration=2.5):
     # 1. 스타일 먼저 적용
     set_custom_style()
     try:
-        duration = max(3.0, float(duration))
+        # 기존에는 최소 3초로 강제되어 첫 진입(F5/URL) 체감 로딩이 길어짐
+        duration = max(0.0, float(duration))
     except Exception:
-        duration = 3.0
+        duration = 0.0
 
     # intro_done 키가 있어도 False면 다시 인트로 재생
     if not st.session_state.get('intro_done', False):
@@ -287,7 +288,8 @@ def display_intro(image_path, duration=2.5):
                         unsafe_allow_html=True,
                     )
                 
-                time.sleep(duration)
+                if duration > 0:
+                    time.sleep(duration)
                 st.session_state['intro_done'] = True
                 intro_place.empty()
             except Exception as e:

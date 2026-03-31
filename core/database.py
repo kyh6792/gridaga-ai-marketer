@@ -1,23 +1,28 @@
 import streamlit as st
-from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 from datetime import datetime
-
-# 세션당 1회만 st.connection 생성 (메뉴 전환·리런마다 서비스 계정 클라이언트 재초기화 완화)
-_GSHEETS_SESSION_KEY = "_singleton_gsheets_connection"
-
+import time
+from core.perf import perf_log
 
 def get_conn():
-    conn = st.session_state.get(_GSHEETS_SESSION_KEY)
+    _t0 = time.perf_counter()
+    # DB_BACKEND=gsheets|supabase. Returns an object exposing read/update methods.
+    from core.db_conn import DBConn
+
+    key = "_singleton_db_conn"
+    conn = st.session_state.get(key)
     if conn is None:
-        conn = st.connection("google_drive", type=GSheetsConnection)
-        st.session_state[_GSHEETS_SESSION_KEY] = conn
+        conn = DBConn()
+        st.session_state[key] = conn
+        perf_log("db.get_conn.create", (time.perf_counter() - _t0) * 1000.0)
+    else:
+        perf_log("db.get_conn.cache_hit", (time.perf_counter() - _t0) * 1000.0)
     return conn
 
 
 def reset_gsheets_connection():
     """시크릿 변경·연결 오류 후 수동으로 다시 붙일 때만 사용."""
-    st.session_state.pop(_GSHEETS_SESSION_KEY, None)
+    st.session_state.pop("_singleton_db_conn", None)
 
 
 def get_sheet_url():
@@ -84,29 +89,83 @@ def _read_prompt_sheet(conn, sheet_url, *, ttl=60, discover_fallbacks=True):
     return pd.DataFrame(), None
 
 
+@st.cache_data(show_spinner=False, ttl=300)
+def _cached_prompt_records(_backend: str, _worksheet: str, _sheet_url: str):
+    """세션을 넘어 재사용되는 프롬프트 캐시(인스턴스 전역)."""
+    conn = get_conn()
+    # Supabase/gsheets 모두 DBConn.read를 통해 동일 인터페이스로 조회
+    df = conn.read(worksheet=_worksheet, ttl=60)
+    if isinstance(df, pd.DataFrame) and "category" in df.columns and "prompt" in df.columns:
+        out = (
+            df[["category", "prompt"]]
+            .astype(str)
+            .dropna(how="all")
+            .to_dict(orient="records")
+        )
+        return out
+    return []
+
+
 def load_prompts_from_sheet(default_prompts):
+    _t0 = time.perf_counter()
     try:
         conn = get_conn()
+        backend = str(getattr(conn, "backend", "gsheets"))
+        worksheet = get_prompt_worksheet()
         sheet_url = get_sheet_url()
+
+        # 인스턴스 전역 캐시 우선(새 세션/F5에도 재사용)
+        try:
+            recs = _cached_prompt_records(backend, worksheet, sheet_url)
+            if recs:
+                out = {str(r.get("category", "")): str(r.get("prompt", "")) for r in recs if r.get("category")}
+                if out:
+                    perf_log("db.load_prompts.cached_records", (time.perf_counter() - _t0) * 1000.0)
+                    return out
+        except Exception:
+            pass
+
+        # Supabase path
+        try:
+            df = conn.read(worksheet=worksheet, ttl=60)
+            if isinstance(df, pd.DataFrame) and 'category' in df.columns and 'prompt' in df.columns:
+                return dict(zip(df['category'], df['prompt']))
+        except Exception:
+            pass
+
         if not sheet_url:
             return default_prompts
 
         df, _ = _read_prompt_sheet(conn, sheet_url)
         if 'category' in df.columns and 'prompt' in df.columns:
-            return dict(zip(df['category'], df['prompt']))
+            out = dict(zip(df['category'], df['prompt']))
+            perf_log("db.load_prompts.success", (time.perf_counter() - _t0) * 1000.0)
+            return out
         return default_prompts
     except Exception as e:
         st.error(f"시트 로드 에러: {repr(e)}")
+        perf_log("db.load_prompts.error", (time.perf_counter() - _t0) * 1000.0)
         return default_prompts
 
 def save_prompt_to_sheet(category, new_prompt):
+    _t0 = time.perf_counter()
     try:
         conn = get_conn()
+        _cached_prompt_records.clear()
+        # Supabase path: upsert single row
+        try:
+            df = pd.DataFrame([{"category": str(category), "prompt": str(new_prompt)}])
+            conn.update(worksheet=get_prompt_worksheet(), data=df)
+            perf_log("db.save_prompt.supabase", (time.perf_counter() - _t0) * 1000.0)
+            return
+        except Exception:
+            pass
+
         sheet_url = get_sheet_url()
         if not sheet_url:
             st.error("시트 URL 설정을 찾을 수 없습니다.")
             return
-        
+
         df, worksheet = _read_prompt_sheet(conn, sheet_url, ttl=0, discover_fallbacks=True)
         if df.empty:
             st.error("프롬프트 시트를 찾지 못했습니다. 시트 탭과 컬럼(category, prompt)을 확인해주세요.")
@@ -116,8 +175,10 @@ def save_prompt_to_sheet(category, new_prompt):
             conn.update(spreadsheet=sheet_url, worksheet=worksheet, data=df)
         else:
             conn.update(spreadsheet=sheet_url, data=df)
+        perf_log("db.save_prompt.gsheets", (time.perf_counter() - _t0) * 1000.0)
     except Exception as e:
         st.error(f"프롬프트 저장 에러: {repr(e)}")
+        perf_log("db.save_prompt.error", (time.perf_counter() - _t0) * 1000.0)
     
 def save_to_history(category, insta_text, blog_text, image_link=""): # image_link 인자 추가
     """마케팅 생성 결과를 구글 시트 'history' 탭에 누적 저장"""
