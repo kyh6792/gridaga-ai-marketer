@@ -24,6 +24,20 @@ _STUDENTS_API_WS = {"students", "attendance_requests", "attendance_log"}
 _SHEETS_API_SESSION_KEY = "_students_sheets_api_service"
 
 
+def _db_backend_is_supabase() -> bool:
+    try:
+        return str(st.secrets.get("DB_BACKEND", "gsheets")).strip().lower() == "supabase"
+    except Exception:
+        return False
+
+
+def _use_sheets_api_first_for_worksheet(worksheet: str) -> bool:
+    """Supabase 모드에서는 DBConn만 쓴다. gsheets일 때만 시트 API 우선."""
+    if worksheet not in _STUDENTS_API_WS:
+        return False
+    return not _db_backend_is_supabase()
+
+
 def invalidate_owner_dashboard_sheet_caches():
     """승인/요청접수/로그재시도 등 시트가 바뀐 뒤 대시보드가 바로 반영되게 캐시 제거."""
     for k in (
@@ -101,7 +115,7 @@ def _update_df_via_sheets_api(worksheet: str, data: pd.DataFrame):
 
 
 def _safe_read(conn, worksheet, ttl=0, retries=2):
-    if worksheet in _STUDENTS_API_WS:
+    if _use_sheets_api_first_for_worksheet(worksheet):
         try:
             return _read_df_via_sheets_api(worksheet)
         except Exception:
@@ -122,7 +136,7 @@ def _safe_read(conn, worksheet, ttl=0, retries=2):
 
 
 def _safe_update(conn, worksheet, data, retries=2):
-    if worksheet in _STUDENTS_API_WS:
+    if _use_sheets_api_first_for_worksheet(worksheet):
         try:
             _update_df_via_sheets_api(worksheet, data)
             return
@@ -166,6 +180,8 @@ def _fast_batch_write_for_approvals(
     log_rows: list[dict],
 ) -> bool:
     """Sheets API row-level write path. Returns True on success."""
+    if _db_backend_is_supabase():
+        return False
     try:
         sheet_url = get_sheet_url()
         spreadsheet_id = _spreadsheet_id_from_url(sheet_url)
@@ -528,8 +544,21 @@ def run_student_ui():
                 st.caption("표시할 출석 이력이 없습니다.")
             else:
                 work = recent_logs.copy()
-                approved_ts = pd.to_datetime(work["approved_time"], errors="coerce") if "approved_time" in work.columns else pd.Series(pd.NaT, index=work.index)
+                # approved_time만 있고 빈 셀이 시트에서 0으로 읽히면 1970년으로 파싱되어
+                # 「오늘」필터에서 원장 직접 차감만 빠지는 경우가 있음 → 승인 연계(request_id 있음)일 때만 승인 시각 사용
                 time_ts = pd.to_datetime(work["time"], errors="coerce") if "time" in work.columns else pd.Series(pd.NaT, index=work.index)
+                if "approved_time" in work.columns and "request_id" in work.columns:
+                    rid = work["request_id"].astype(str).str.strip()
+                    approved_ts = pd.to_datetime(
+                        work["approved_time"].where(rid != "", pd.NA),
+                        errors="coerce",
+                    )
+                elif "approved_time" in work.columns:
+                    approved_ts = pd.to_datetime(work["approved_time"], errors="coerce")
+                    bad = approved_ts.notna() & (approved_ts.dt.year < 2000)
+                    approved_ts = approved_ts.mask(bad)
+                else:
+                    approved_ts = pd.Series(pd.NaT, index=work.index)
                 ts = approved_ts.where(approved_ts.notna(), time_ts)
                 now = datetime.now()
                 if view_scope == "오늘":

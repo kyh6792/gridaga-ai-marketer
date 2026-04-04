@@ -157,6 +157,8 @@ def set_custom_style():
             min-height: 100dvh !important;
             margin: 0 !important;
             background-color: #FCF9F2 !important;
+            overflow-x: hidden !important;
+            overscroll-behavior-x: none !important;
         }
         .stApp {
             background: __CANVAS_BG__ !important;
@@ -166,9 +168,11 @@ def set_custom_style():
             background-repeat: no-repeat !important;
             min-height: 100vh !important;
             min-height: 100dvh !important;
+            overflow-x: hidden !important;
         }
         [data-testid="stAppViewContainer"] {
             background: transparent !important;
+            overflow-x: hidden !important;
         }
 
         /* 인트로 전용 클래스 */
@@ -416,7 +420,7 @@ def apply_owner_dashboard_style():
             border-bottom: none;
         }
         .sticky-owner-header.full-bleed {
-            width: 100vw;
+            width: 100%;
             padding-left: 1rem;
             padding-right: 1rem;
             box-sizing: border-box;
@@ -451,6 +455,8 @@ def apply_owner_dashboard_style():
             min-height: 100dvh !important;
             margin: 0 !important;
             background-color: #FCF9F2 !important;
+            overflow-x: hidden !important;
+            overscroll-behavior-x: none !important;
         }
         .stApp {
             background: __CANVAS_BG__ !important;
@@ -460,9 +466,11 @@ def apply_owner_dashboard_style():
             background-repeat: no-repeat !important;
             min-height: 100vh !important;
             min-height: 100dvh !important;
+            overflow-x: hidden !important;
         }
         [data-testid="stAppViewContainer"] {
             background: transparent !important;
+            overflow-x: hidden !important;
         }
         .block-container {
             padding-top: 0 !important;

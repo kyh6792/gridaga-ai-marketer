@@ -4,6 +4,7 @@ from datetime import datetime
 import time
 from core.database import get_conn
 from core.perf import perf_log
+from core.streamlit_dataframe import dataframe_for_data_editor
 
 
 WORKSHEET_NAME = "curriculum"
@@ -59,6 +60,21 @@ def _safe_update(conn, worksheet, data, retries=2):
     raise last_error
 
 
+def _cell_to_str(v) -> str:
+    """시트/DB에서 숫자(예: 7)로 온 값도 str로 — st.data_editor TextColumn dtype 충돌 방지."""
+    if v is None:
+        return ""
+    if isinstance(v, float) and pd.isna(v):
+        return ""
+    if isinstance(v, bool):
+        return str(v).strip()
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, float):
+        return str(int(v)) if v.is_integer() else str(v)
+    return str(v).strip()
+
+
 def _coerce_course_df(df):
     if df is None or df.empty:
         return pd.DataFrame(columns=COURSE_COLUMNS)
@@ -73,10 +89,9 @@ def _coerce_course_df(df):
     out["sessions"] = pd.to_numeric(out["sessions"], errors="coerce").fillna(0).astype(int)
     out["amount"] = pd.to_numeric(out["amount"], errors="coerce").fillna(0).astype(int)
     out["sort_order"] = pd.to_numeric(out["sort_order"], errors="coerce").fillna(9999).astype(int)
-    out["course_id"] = out["course_id"].astype(str).str.strip()
-    out["course_name"] = out["course_name"].astype(str).str.strip()
-    out["description"] = out["description"].astype(str)
-    out["created_at"] = out["created_at"].astype(str).str.strip()
+    for col in ("course_id", "course_name", "description", "created_at"):
+        out[col] = out[col].map(_cell_to_str)
+        out[col] = out[col].astype(object)
     return out
 
 
@@ -227,6 +242,7 @@ def _render_course_bulk_edit(conn, df):
     )
     edit_df = df.copy() if not df.empty else pd.DataFrame(columns=COURSE_COLUMNS)
     edit_df = _coerce_course_df(edit_df)
+    edit_df = dataframe_for_data_editor(edit_df)
 
     edited = st.data_editor(
         edit_df,

@@ -6,7 +6,6 @@ import base64
 from pathlib import Path
 import pandas as pd
 from core.perf import perf_log, perf_enabled, perf_recent_top
-import time
 
 # 배포본 core/ui.py 버전이 달라도 ImportError 나지 않게 모듈 단위로 로드
 import core.ui as _ui
@@ -91,13 +90,15 @@ retry_failed_log_request = getattr(
     lambda *args, **kwargs: (False, "로그 재시도 기능을 불러오지 못했습니다."),
 )
 from core.schedule import get_today_schedule_by_student
+from core.fullscreen_view import layout_for_fullscreen_query, try_render_fullscreen_tables
+
 _t_boot0 = time.perf_counter()
 
 # --- 1. 페이지 설정 ---
 st.set_page_config(
-    page_title="작업실 그리다가 OS", 
-    page_icon="🎨", 
-    layout="centered" # 모바일은 wide보다 centered가 가독성이 좋습니다.
+    page_title="작업실 그리다가 OS",
+    page_icon="🎨",
+    layout=layout_for_fullscreen_query(),
 )
 perf_log("boot.set_page_config", (time.perf_counter() - _t_boot0) * 1000.0)
 _inject_chrome = getattr(_ui, "inject_global_streamlit_chrome_hide", None)
@@ -232,25 +233,31 @@ def render_intro_branch():
     # 이미지가 있을 때: 뒤 레이어 없음 → PNG 투명 부분이 앱 캔버스 배경을 비춤 (베이지 박스 금지)
     student_fallback = "linear-gradient(120deg, #C09066 0%, #B47F57 55%, #A86E48 100%)"
     teacher_fallback = "linear-gradient(120deg, #9E6B43 0%, #8E5F3D 58%, #7E5233 100%)"
-    student_bg = student_fallback
-    teacher_bg = teacher_fallback
-    try:
-        root = Path(__file__).resolve().parent
-        assets = root / "assets"
-        for s_name in ("student_bt.png", "student_bt.PNG"):
-            s_path = assets / s_name
-            if s_path.exists():
-                s_b64 = base64.b64encode(s_path.read_bytes()).decode("ascii")
-                student_bg = f"url('data:image/png;base64,{s_b64}') center center / cover no-repeat"
-                break
-        for t_name in ("teacher_bt.png", "teacher_bt.PNG"):
-            t_path = assets / t_name
-            if t_path.exists():
-                t_b64 = base64.b64encode(t_path.read_bytes()).decode("ascii")
-                teacher_bg = f"url('data:image/png;base64,{t_b64}') center center / cover no-repeat"
-                break
-    except Exception:
-        pass
+    _intro_bg_cache_key = "_intro_entry_button_bg_b64"
+    if _intro_bg_cache_key in st.session_state:
+        student_bg = st.session_state[_intro_bg_cache_key]["student"]
+        teacher_bg = st.session_state[_intro_bg_cache_key]["teacher"]
+    else:
+        student_bg = student_fallback
+        teacher_bg = teacher_fallback
+        try:
+            root = Path(__file__).resolve().parent
+            assets = root / "assets"
+            for s_name in ("student_bt.png", "student_bt.PNG"):
+                s_path = assets / s_name
+                if s_path.exists():
+                    s_b64 = base64.b64encode(s_path.read_bytes()).decode("ascii")
+                    student_bg = f"url('data:image/png;base64,{s_b64}') center center / cover no-repeat"
+                    break
+            for t_name in ("teacher_bt.png", "teacher_bt.PNG"):
+                t_path = assets / t_name
+                if t_path.exists():
+                    t_b64 = base64.b64encode(t_path.read_bytes()).decode("ascii")
+                    teacher_bg = f"url('data:image/png;base64,{t_b64}') center center / cover no-repeat"
+                    break
+        except Exception:
+            pass
+        st.session_state[_intro_bg_cache_key] = {"student": student_bg, "teacher": teacher_bg}
 
     css = """
         <style>
@@ -829,6 +836,20 @@ if st.session_state.get('intro_done'):
         st.query_params.pop("owner_login_at", None)
         if st.session_state.get("entry_mode") == "owner":
             st.warning("Google 로그인 세션이 만료되었습니다. 다시 로그인해주세요.")
+
+    # 표 전용 URL(?fullscreen=…)은 원장 모드로만 처리하고, 본문은 여기서 끝(st.stop)
+    try:
+        _fs_qp = str(st.query_params.get("fullscreen", "") or "").strip()
+    except Exception:
+        _fs_qp = ""
+    if _fs_qp in ("schedule_month", "finance_expenses"):
+        st.session_state["entry_mode"] = "owner"
+        try:
+            st.query_params["mode"] = "owner"
+        except Exception:
+            pass
+    if try_render_fullscreen_tables():
+        st.stop()
 
     mode = st.session_state.get("entry_mode")
     if mode is None:

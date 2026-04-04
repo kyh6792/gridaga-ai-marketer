@@ -4,6 +4,7 @@ import pandas as pd
 from datetime import datetime
 from core.database import get_conn
 from core.curriculum import get_course_price_map
+from core.streamlit_dataframe import dataframe_for_data_editor
 
 
 WORKSHEET_NAME = "finance_transactions"
@@ -86,6 +87,73 @@ def _to_int_amount(v):
     txt = str(v)
     nums = re.sub(r"[^0-9]", "", txt)
     return int(nums) if nums else 0
+
+
+def _expense_row_label(row) -> str:
+    d = str(row.get("date", "")).strip()[:10]
+    cat = str(row.get("category", "")).strip()
+    it = str(row.get("item", "")).strip()
+    amt = _to_int_amount(row.get("amount", 0))
+    eid = str(row.get("ex_id", "")).strip()
+    return f"{d} | {cat} | {it} | {amt:,}원 ({eid})"
+
+
+def _expense_cell_to_str(v) -> str:
+    """비용 표 편집기 TextColumn — 숫자만 들어간 셀(int)이면 str로 바꿔 dtype 오류 방지."""
+    if v is None:
+        return ""
+    if isinstance(v, float) and pd.isna(v):
+        return ""
+    if isinstance(v, bool):
+        return str(v).strip()
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, float):
+        return str(int(v)) if v.is_integer() else str(v)
+    return str(v).strip()
+
+
+def _coerce_expense_date_str(v) -> str | None:
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return None
+    if hasattr(v, "strftime"):
+        return v.strftime("%Y-%m-%d")
+    s = str(v).strip()[:10]
+    if len(s) >= 8 and s[4:5] == "-" and s[7:8] == "-":
+        return s
+    parsed = pd.to_datetime(v, errors="coerce")
+    if pd.isna(parsed):
+        return None
+    return parsed.strftime("%Y-%m-%d")
+
+
+def _apply_expense_edits_from_table(ex_full: pd.DataFrame, edited: pd.DataFrame) -> pd.DataFrame:
+    """edited: date(또는 date-like), category, item, amount, note, ex_id 열."""
+    out = ex_full.copy()
+    for _, er in edited.iterrows():
+        eid = str(er.get("ex_id", "")).strip()
+        if not eid:
+            continue
+        mask = out["ex_id"].astype(str).str.strip() == eid
+        if not mask.any():
+            continue
+        ds = _coerce_expense_date_str(er.get("date"))
+        if not ds:
+            continue
+        amt = _to_int_amount(er.get("amount", 0))
+        if amt <= 0:
+            continue
+        out.loc[mask, "date"] = ds
+        out.loc[mask, "year_month"] = ds[:7]
+        out.loc[mask, "category"] = str(er.get("category", "")).strip()
+        out.loc[mask, "item"] = str(er.get("item", "")).strip()
+        out.loc[mask, "amount"] = int(amt)
+        out.loc[mask, "note"] = str(er.get("note", "")).strip()
+    out["amount"] = pd.to_numeric(out["amount"], errors="coerce").fillna(0).astype(int)
+    for c in EXPENSE_COLUMNS:
+        if c not in out.columns:
+            out[c] = ""
+    return out[EXPENSE_COLUMNS].copy()
 
 
 def _resolve_course_amount(course_name):
@@ -295,6 +363,71 @@ def run_finance_ui():
                         st.success("비용이 저장되었습니다.")
                         st.rerun()
 
+        with st.expander("✏️ 비용 수정", expanded=False):
+            if ex_view.empty:
+                st.info("수정할 비용 데이터가 없습니다.")
+            else:
+                sorted_ex = ex_view.sort_values(by="date", ascending=False)
+                labels: list[str] = []
+                ids: list[str] = []
+                for _, r in sorted_ex.iterrows():
+                    eid = str(r.get("ex_id", "")).strip()
+                    if not eid:
+                        continue
+                    ids.append(eid)
+                    labels.append(_expense_row_label(r))
+                if not ids:
+                    st.info("비용 ID(ex_id)가 있는 항목이 없습니다.")
+                else:
+                    pick = st.selectbox(
+                        "수정할 항목",
+                        range(len(ids)),
+                        format_func=lambda i: labels[i],
+                        key="finance_expense_edit_pick",
+                    )
+                    sel_id = ids[int(pick)]
+                    row = ex_view[ex_view["ex_id"].astype(str).str.strip() == sel_id].iloc[0]
+                    with st.form("expense_edit_form"):
+                        ed_cat = st.text_input("비용 분류", value=str(row.get("category", "")))
+                        ed_item = st.text_input("항목명", value=str(row.get("item", "")))
+                        ed_amt = st.number_input(
+                            "비용 금액(원)",
+                            min_value=0,
+                            value=int(_to_int_amount(row.get("amount", 0))),
+                            step=1000,
+                        )
+                        ed_parsed = pd.to_datetime(row.get("date"), errors="coerce")
+                        ed_date = st.date_input(
+                            "지출일",
+                            value=ed_parsed.date() if not pd.isna(ed_parsed) else datetime.now().date(),
+                        )
+                        ed_note = st.text_area("메모", value=str(row.get("note", "")))
+                        if st.form_submit_button("수정 저장", use_container_width=True):
+                            if ed_amt <= 0:
+                                st.error("비용 금액은 0보다 커야 합니다.")
+                            else:
+                                conn_e, full = _read_or_init_expenses(ttl=0)
+                                mask = full["ex_id"].astype(str).str.strip() == sel_id
+                                if not mask.any():
+                                    st.error("항목을 찾을 수 없습니다. 새로고침 후 다시 시도하세요.")
+                                else:
+                                    ds = ed_date.strftime("%Y-%m-%d")
+                                    full = full.copy()
+                                    full.loc[mask, "date"] = ds
+                                    full.loc[mask, "year_month"] = ds[:7]
+                                    full.loc[mask, "category"] = str(ed_cat).strip()
+                                    full.loc[mask, "item"] = str(ed_item).strip()
+                                    full.loc[mask, "amount"] = int(ed_amt)
+                                    full.loc[mask, "note"] = str(ed_note).strip()
+                                    for c in EXPENSE_COLUMNS:
+                                        if c not in full.columns:
+                                            full[c] = ""
+                                    full["amount"] = pd.to_numeric(full["amount"], errors="coerce").fillna(0).astype(int)
+                                    conn_e.update(worksheet=EXPENSE_WORKSHEET_NAME, data=full[EXPENSE_COLUMNS])
+                                    mark_finance_sheet_dirty()
+                                    st.success("비용이 수정되었습니다.")
+                                    st.rerun()
+
         ex_year_view = ex_view[ex_view["year_month"].str.startswith(year_prefix, na=False)].copy()
         ex_month_view = ex_view[ex_view["year_month"] == ym_now].copy()
         annual_expense = int(ex_year_view["amount"].sum()) if not ex_year_view.empty else 0
@@ -315,15 +448,75 @@ def run_finance_ui():
                 st.dataframe(by_month_ex, use_container_width=True, hide_index=True)
 
         with st.expander("🗓 월별 비용", expanded=False):
-            st.metric("이번 달 비용", f"{month_expense:,}원")
-            if ex_month_view.empty:
-                st.info(f"{ym_now} 비용 데이터가 없습니다.")
+            # 조회 월 선택: 이번 달 고정이 아니라 월별 항목 조회 가능
+            month_options = sorted(
+                [m for m in ex_view["year_month"].dropna().astype(str).str.strip().unique().tolist() if m],
+                reverse=True,
+            )
+            default_month = ym_now if ym_now in month_options else (month_options[0] if month_options else ym_now)
+            selected_month = st.selectbox("조회 월", month_options if month_options else [ym_now], index=0, key="finance_expense_selected_month")
+            if selected_month != default_month and default_month in month_options:
+                # 사용자가 선택을 바꿀 수 있으므로, 첫 렌더 기본값만 안내
+                pass
+
+            from core.fullscreen_view import FS_FINANCE_EXPENSES, new_tab_link_markdown
+
+            st.markdown(
+                new_tab_link_markdown(
+                    "이 조회 월 표를 새 창에서 크게 보기",
+                    FS_FINANCE_EXPENSES,
+                    expense_month=str(selected_month),
+                ),
+                unsafe_allow_html=True,
+            )
+
+            selected_month_view = ex_view[ex_view["year_month"] == selected_month].copy()
+            selected_month_expense = int(selected_month_view["amount"].sum()) if not selected_month_view.empty else 0
+            st.metric(f"{selected_month} 비용", f"{selected_month_expense:,}원")
+            if selected_month_view.empty:
+                st.info(f"{selected_month} 비용 데이터가 없습니다.")
             else:
-                st.dataframe(
-                    ex_month_view.sort_values(by="date", ascending=False)[["date", "category", "item", "amount", "note", "ex_id"]],
-                    use_container_width=True,
-                    hide_index=True,
+                by_category = (
+                    selected_month_view.groupby("category", as_index=False)["amount"]
+                    .sum()
+                    .sort_values("amount", ascending=False)
                 )
+                st.caption("분류별 합계")
+                st.dataframe(by_category, use_container_width=True, hide_index=True)
+                st.caption("비용 항목 목록 — 셀을 직접 고친 뒤 아래 버튼으로 저장하세요 (ID 열은 변경 불가)")
+                list_df = selected_month_view.sort_values(by="date", ascending=False)[
+                    ["date", "category", "item", "amount", "note", "ex_id"]
+                ].copy()
+                list_df["amount"] = pd.to_numeric(list_df["amount"], errors="coerce").fillna(0).astype(int)
+                dconv = pd.to_datetime(list_df["date"], errors="coerce")
+                today_d = datetime.now().date()
+                list_df["date"] = [x.date() if pd.notna(x) else today_d for x in dconv]
+                for _c in ("category", "item", "note", "ex_id"):
+                    list_df[_c] = list_df[_c].map(_expense_cell_to_str)
+                    list_df[_c] = list_df[_c].astype(object)
+                list_df = dataframe_for_data_editor(list_df)
+                edited_tbl = st.data_editor(
+                    list_df,
+                    column_config={
+                        "ex_id": st.column_config.TextColumn("ID", disabled=True),
+                        "date": st.column_config.DateColumn("지출일", format="YYYY-MM-DD"),
+                        "amount": st.column_config.NumberColumn("금액", format="%d", min_value=1, step=1000),
+                        "category": st.column_config.TextColumn("분류"),
+                        "item": st.column_config.TextColumn("항목"),
+                        "note": st.column_config.TextColumn("메모"),
+                    },
+                    use_container_width=True,
+                    num_rows="fixed",
+                    hide_index=True,
+                    key=f"finance_expense_table_editor_{selected_month}",
+                )
+                if st.button("표 수정 내용 저장", key=f"finance_expense_table_save_{selected_month}", use_container_width=True):
+                    conn_tbl, full = _read_or_init_expenses(ttl=0)
+                    merged = _apply_expense_edits_from_table(full, edited_tbl)
+                    conn_tbl.update(worksheet=EXPENSE_WORKSHEET_NAME, data=merged)
+                    mark_finance_sheet_dirty()
+                    st.success("표에서 수정한 비용이 반영되었습니다.")
+                    st.rerun()
 
         with st.expander("🔢 비용 등록건수", expanded=False):
             st.metric("올해 등록건수", f"{annual_expense_count}건")
@@ -348,3 +541,54 @@ def run_finance_ui():
         with c2:
             st.metric(f"{ym_now} 수입", f"{month_income:,}원")
             st.caption(f"월매출 {month_sales_total:,}원 - 월비용 {month_expense_total:,}원")
+
+
+def render_finance_expenses_fullscreen_page():
+    """?fullscreen=finance_expenses&expense_month=YYYY-MM — 새 탭 전용(조회·읽기)."""
+    try:
+        import core.ui as _ui
+
+        _style = getattr(_ui, "apply_owner_dashboard_style", None)
+        if callable(_style):
+            _style()
+    except Exception:
+        pass
+    _ttl = _finance_read_ttl()
+    _, ex_df = _read_or_init_expenses(ttl=_ttl)
+    ex_view = ex_df.copy() if ex_df is not None else pd.DataFrame(columns=EXPENSE_COLUMNS)
+    ex_view["amount"] = pd.to_numeric(ex_view["amount"], errors="coerce").fillna(0).astype(int)
+    ex_view["year_month"] = ex_view["year_month"].astype(str).str.strip()
+
+    ym = str(st.query_params.get("expense_month", "") or "").strip()
+    if not ym:
+        ym = datetime.now().strftime("%Y-%m")
+
+    st.subheader(f"🗓 월별 비용 · {ym}")
+    st.caption("비용 등록·수정·표에서 편집은 메인 화면 → 재무 → 비용 처리에서 해 주세요.")
+
+    selected_month_view = ex_view[ex_view["year_month"] == ym].copy()
+    selected_month_expense = int(selected_month_view["amount"].sum()) if not selected_month_view.empty else 0
+    st.metric(f"{ym} 비용 합계", f"{selected_month_expense:,}원")
+
+    if selected_month_view.empty:
+        st.info(f"{ym} 비용 데이터가 없습니다.")
+    else:
+        by_category = (
+            selected_month_view.groupby("category", as_index=False)["amount"]
+            .sum()
+            .sort_values("amount", ascending=False)
+        )
+        st.caption("분류별 합계")
+        st.dataframe(by_category, use_container_width=True, hide_index=True)
+        st.caption("비용 항목 목록")
+        st.dataframe(
+            selected_month_view.sort_values(by="date", ascending=False)[
+                ["date", "category", "item", "amount", "note", "ex_id"]
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+    st.markdown(
+        '<p style="margin-top:1rem;"><a href="/" target="_self">← 메인 화면으로</a></p>',
+        unsafe_allow_html=True,
+    )

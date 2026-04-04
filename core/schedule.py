@@ -82,10 +82,13 @@ def _read_or_init_schedule(ttl=60):
 
 
 def _get_registered_students():
-    """students 시트에서 등록된(재원) 원생 목록을 가져옵니다."""
+    """students에서 일정 등록용 목록. 명부와 동일한 상태 규칙·최신 데이터를 씁니다."""
+    from core.students import _normalize_student_id_text, _normalize_student_status
+
     conn = get_conn()
     try:
-        sdf = _safe_read(conn, worksheet="students", ttl=60)
+        # 명부에 맞춘 직후 반영을 위해 캐시 없이 조회
+        sdf = _safe_read(conn, worksheet="students", ttl=0)
     except Exception:
         return pd.DataFrame(columns=["ID", "이름", "상태"])
 
@@ -96,13 +99,13 @@ def _get_registered_students():
         if c not in sdf.columns:
             sdf[c] = ""
 
-    # ID 정리
-    sdf["ID"] = pd.to_numeric(sdf["ID"], errors="coerce").fillna(0).astype(int).astype(str)
+    sdf["ID"] = sdf["ID"].map(_normalize_student_id_text)
+    sdf = sdf[sdf["ID"] != ""]
     sdf["이름"] = sdf["이름"].astype(str).str.strip()
-    sdf["상태"] = sdf["상태"].astype(str).str.strip()
-    sdf = sdf[sdf["이름"] != ""]
+    sdf["상태"] = _normalize_student_status(sdf["상태"])
+    sdf = sdf[~sdf["이름"].isin(("", "nan", "None", "NaN"))]
 
-    # 재원생 우선
+    # 재원만 (명부 카드의 '재원생만'과 동일). 비어 있으면 전체 후보(이름 있는 행)
     active = sdf[sdf["상태"] == "재원"].copy()
     return active if not active.empty else sdf
 
@@ -145,7 +148,7 @@ def run_schedule_ui(simple_mode=False):
         if section == "📋 시간표 보기":
             _render_schedule_view(df)
         elif section == "🗂 월별 타임테이블":
-            _render_monthly_timetable(df)
+            _render_monthly_timetable(conn, df)
         else:
             _render_schedule_create(conn, df)
     else:
@@ -159,12 +162,77 @@ def run_schedule_ui(simple_mode=False):
         if section == "📋 시간표 보기":
             _render_schedule_view(df)
         elif section == "🗂 월별 타임테이블":
-            _render_monthly_timetable(df)
+            _render_monthly_timetable(conn, df)
         elif section == "➕ 일정 등록":
             _render_schedule_create(conn, df)
         else:
             _render_schedule_delete(conn, df)
     perf_log("schedule.run_schedule_ui", (time.perf_counter() - _t0) * 1000.0)
+
+
+def _monthly_timetable_weekdays_and_slots():
+    weekdays = ["월", "화", "수", "목", "금", "토"]
+    rows = [
+        "10:30~13:00",
+        "14:30~17:00",
+        "18:30~21:00",
+        "09:30~12:00",
+        "13:00~15:30",
+    ]
+    return weekdays, rows
+
+
+def build_monthly_timetable_parts(df, year: int, month: int):
+    """(월별 격자 DataFrame, 해당 월 활성 일정 서브셋). df 비어 있으면 (빈 DF, 빈 DF)."""
+    weekdays, slot_rows = _monthly_timetable_weekdays_and_slots()
+    if df is None or df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    active_df = df[df.apply(lambda r: _is_active_in_month(r, int(year), int(month)), axis=1)].copy()
+    table_data = []
+    for slot in slot_rows:
+        row = {"시간대": slot}
+        for wd in weekdays:
+            slot_df = active_df[
+                (active_df["weekday"].astype(str) == wd)
+                & (active_df["time_slot"].astype(str) == slot)
+            ]
+            names = [str(x).strip() for x in slot_df["student_name"].tolist() if str(x).strip()]
+            count = len(names)
+            if count == 0:
+                cell = "-"
+            else:
+                people = ", ".join(names[:4])
+                over = " ⚠️" if count > MAX_STUDENTS_PER_SLOT else ""
+                cell = f"{count}/{MAX_STUDENTS_PER_SLOT}명{over}\n{people}"
+            row[wd] = cell
+        table_data.append(row)
+    return pd.DataFrame(table_data), active_df
+
+
+def render_monthly_timetable_fullscreen_page():
+    """?fullscreen=schedule_month&schedule_year=&schedule_month= — 새 탭 전용."""
+    conn, df = _read_or_init_schedule(ttl=_schedule_read_ttl())
+    try:
+        y = int(float(str(st.query_params.get("schedule_year", datetime.now().year))))
+        m = int(float(str(st.query_params.get("schedule_month", datetime.now().month))))
+    except Exception:
+        y, m = datetime.now().year, datetime.now().month
+    y = max(2020, min(2100, y))
+    m = max(1, min(12, m))
+
+    st.subheader(f"🗂 월별 타임테이블 · {y}년 {m}월")
+    st.caption("시간 수정·등록은 메인 화면 → 원생 관리 → 월별 타임테이블에서 해 주세요.")
+    if df.empty:
+        st.info("등록된 시간표가 없습니다.")
+    else:
+        table_df, _ = build_monthly_timetable_parts(df, y, m)
+        st.caption(f"{y}년 {m}월 기준 | 시간대별 정원 {MAX_STUDENTS_PER_SLOT}명")
+        st.dataframe(table_df, use_container_width=True, hide_index=True)
+    st.markdown(
+        '<p style="margin-top:1rem;"><a href="/" target="_self">← 메인 화면으로</a></p>',
+        unsafe_allow_html=True,
+    )
 
 
 def _is_active_in_month(row, year, month):
@@ -209,7 +277,9 @@ def _render_schedule_view(df):
     )
 
 
-def _render_monthly_timetable(df):
+def _render_monthly_timetable(conn, df):
+    from core.fullscreen_view import FS_SCHEDULE_MONTH, new_tab_link_markdown
+
     now = datetime.now()
     c1, c2 = st.columns(2)
     with c1:
@@ -217,43 +287,108 @@ def _render_monthly_timetable(df):
     with c2:
         month = st.number_input("월", min_value=1, max_value=12, value=now.month, step=1)
 
-    weekdays = ["월", "화", "수", "목", "금", "토"]
-    rows = [
-        "10:30~13:00",
-        "14:30~17:00",
-        "18:30~21:00",
-        "09:30~12:00",
-        "13:00~15:30",
-    ]
+    st.markdown(
+        new_tab_link_markdown(
+            "이 연·월 표를 새 창에서 크게 보기",
+            FS_SCHEDULE_MONTH,
+            schedule_year=int(year),
+            schedule_month=int(month),
+        ),
+        unsafe_allow_html=True,
+    )
 
     if df.empty:
         st.info("등록된 시간표가 없습니다.")
         return
 
-    active_df = df[df.apply(lambda r: _is_active_in_month(r, int(year), int(month)), axis=1)].copy()
-
-    table_data = []
-    for slot in rows:
-        row = {"시간대": slot}
-        for wd in weekdays:
-            slot_df = active_df[
-                (active_df["weekday"].astype(str) == wd) &
-                (active_df["time_slot"].astype(str) == slot)
-            ]
-            names = [str(x).strip() for x in slot_df["student_name"].tolist() if str(x).strip()]
-            count = len(names)
-            if count == 0:
-                cell = "-"
-            else:
-                people = ", ".join(names[:4])
-                over = " ⚠️" if count > MAX_STUDENTS_PER_SLOT else ""
-                cell = f"{count}/{MAX_STUDENTS_PER_SLOT}명{over}\n{people}"
-            row[wd] = cell
-        table_data.append(row)
+    table_df, active_df = build_monthly_timetable_parts(df, int(year), int(month))
 
     st.caption(f"{int(year)}년 {int(month)}월 기준 | 시간대별 정원 {MAX_STUDENTS_PER_SLOT}명")
-    table_df = pd.DataFrame(table_data)
     st.dataframe(table_df, use_container_width=True, hide_index=True)
+
+    # 시간 수정 기능
+    st.markdown("---")
+    st.markdown("**시간 수정**")
+    if active_df.empty:
+        st.info("선택한 월에 수정 가능한 일정이 없습니다.")
+        return
+
+    edit_view = active_df.copy()
+    edit_view["label"] = (
+        edit_view["student_name"].astype(str).str.strip()
+        + " ("
+        + edit_view["student_id"].astype(str).str.strip()
+        + ") | "
+        + edit_view["weekday"].astype(str).str.strip()
+        + " "
+        + edit_view["time_slot"].astype(str).str.strip()
+    )
+    edit_options = edit_view["label"].tolist()
+    picked = st.selectbox("수정할 일정", edit_options, key="schedule_edit_pick")
+    target = edit_view[edit_view["label"] == picked].head(1)
+    if target.empty:
+        return
+
+    row = target.iloc[0]
+    cur_id = str(row.get("id", ""))
+    cur_weekday = str(row.get("weekday", "월"))
+    cur_time_slot = str(row.get("time_slot", "10:30~13:00"))
+    cur_start = str(row.get("start_date", ""))
+    cur_end = str(row.get("end_date", ""))
+    cur_memo = str(row.get("memo", ""))
+
+    c3, c4 = st.columns(2)
+    with c3:
+        new_weekday = st.selectbox(
+            "새 요일",
+            WEEKDAY_ORDER,
+            index=WEEKDAY_ORDER.index(cur_weekday) if cur_weekday in WEEKDAY_ORDER else 0,
+            key="schedule_edit_weekday",
+        )
+    with c4:
+        time_options = TIME_SLOTS_BY_WEEKDAY.get(new_weekday, ["10:30~13:00"])
+        default_idx = time_options.index(cur_time_slot) if cur_time_slot in time_options else 0
+        new_time_slot = st.selectbox(
+            "새 시간대",
+            time_options,
+            index=default_idx,
+            key="schedule_edit_time_slot",
+        )
+
+    c5, c6 = st.columns(2)
+    with c5:
+        new_start = st.text_input("시작일", value=cur_start, key="schedule_edit_start")
+    with c6:
+        new_end = st.text_input("종료일", value=cur_end, key="schedule_edit_end")
+    new_memo = st.text_area("메모", value=cur_memo, key="schedule_edit_memo")
+
+    if st.button("선택 일정 시간 수정", use_container_width=True, key="schedule_edit_submit"):
+        # 정원 체크(대상 행 제외)
+        others = df[df["id"].astype(str) != cur_id].copy()
+        active_same = others[
+            (others["weekday"].astype(str) == str(new_weekday))
+            & (others["time_slot"].astype(str) == str(new_time_slot))
+        ]
+        if len(active_same) >= MAX_STUDENTS_PER_SLOT:
+            st.error(f"{new_weekday} {new_time_slot} 시간대는 정원 {MAX_STUDENTS_PER_SLOT}명입니다.")
+            return
+
+        updated = df.copy()
+        idx = updated.index[updated["id"].astype(str) == cur_id].tolist()
+        if not idx:
+            st.error("수정 대상 일정을 찾지 못했습니다. 다시 시도해주세요.")
+            return
+        i = idx[0]
+        updated.at[i, "weekday"] = str(new_weekday)
+        updated.at[i, "time_slot"] = str(new_time_slot)
+        updated.at[i, "start_date"] = str(new_start).strip()
+        updated.at[i, "end_date"] = str(new_end).strip()
+        updated.at[i, "memo"] = str(new_memo).strip()
+
+        _safe_update(conn, worksheet=WORKSHEET_NAME, data=updated)
+        _mark_schedule_dirty()
+        st.success("일정 시간이 수정되었습니다.")
+        st.rerun()
 
 
 def _render_schedule_create(conn, df):

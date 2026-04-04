@@ -3,7 +3,8 @@ param(
   [Parameter(Mandatory=$false)][string]$Region = "asia-northeast3",
   [Parameter(Mandatory=$false)][string]$ServiceName = "giridaga-marketer",
   [Parameter(Mandatory=$false)][string]$SecretsName = "streamlit-secrets",
-  [Parameter(Mandatory=$false)][string]$CloudSecretsFile = ".streamlit/secrets.cloud.toml"
+  [Parameter(Mandatory=$false)][string]$CloudSecretsFile = ".streamlit/secrets.cloud.toml",
+  [Parameter(Mandatory=$false)][int]$MinInstances = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,7 +17,15 @@ Write-Host "[1/2] Refresh secret version from $CloudSecretsFile"
 .\scripts\create_secret.ps1 -ProjectId $ProjectId -SecretsName $SecretsName -SecretsFile $CloudSecretsFile
 
 Write-Host "[2/2] Redeploy Cloud Run service"
-.\scripts\deploy_cloud_run.ps1 -ProjectId $ProjectId -Region $Region -ServiceName $ServiceName -SecretsName $SecretsName
+$deployParams = @{
+  Service    = $ServiceName
+  Region     = $Region
+  SecretName = $SecretsName
+}
+if ($MinInstances -gt 0) {
+  $deployParams.MinInstances = $MinInstances
+}
+& "$PSScriptRoot\deploy_cloud_run.ps1" @deployParams
 
 Write-Host "Redeploy completed."
 
