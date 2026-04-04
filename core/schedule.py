@@ -1,4 +1,7 @@
+import json
+
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 from datetime import datetime
 import time
@@ -212,6 +215,8 @@ def build_monthly_timetable_parts(df, year: int, month: int):
 
 def render_monthly_timetable_fullscreen_page():
     """?fullscreen=schedule_month&schedule_year=&schedule_month= — 새 탭 전용."""
+    from core.fullscreen_view import fullscreen_page_close_block_html
+
     conn, df = _read_or_init_schedule(ttl=_schedule_read_ttl())
     try:
         y = int(float(str(st.query_params.get("schedule_year", datetime.now().year))))
@@ -229,10 +234,7 @@ def render_monthly_timetable_fullscreen_page():
         table_df, _ = build_monthly_timetable_parts(df, y, m)
         st.caption(f"{y}년 {m}월 기준 | 시간대별 정원 {MAX_STUDENTS_PER_SLOT}명")
         st.dataframe(table_df, use_container_width=True, hide_index=True)
-    st.markdown(
-        '<p style="margin-top:1rem;"><a href="/" target="_self">← 메인 화면으로</a></p>',
-        unsafe_allow_html=True,
-    )
+    st.markdown(fullscreen_page_close_block_html(), unsafe_allow_html=True)
 
 
 def _is_active_in_month(row, year, month):
@@ -277,8 +279,72 @@ def _render_schedule_view(df):
     )
 
 
+def _inject_monthly_timetable_fullscreen_opens_new_tab(href: str) -> None:
+    """표 툴바 «전체 화면» 클릭을 새 탭 전용 페이지로 연결(공식 API 없음 → JS 후킹, Streamlit 버전에 따라 동작이 달라질 수 있음)."""
+    href_js = json.dumps(href)
+
+    components.html(
+        f"""
+        <script>
+        (function () {{
+          const doc = window.parent && window.parent.document ? window.parent.document : document;
+          const href = {href_js};
+
+          function hookFullscreenButton(root) {{
+            if (!root) return false;
+            const df =
+              root.querySelector('[data-testid="stDataFrame"]') ||
+              root.querySelector('[data-testid="stDataFrameResizable"]') ||
+              root;
+            const candidates = df.querySelectorAll('button, [role="button"]');
+            let hooked = false;
+            candidates.forEach((b) => {{
+              if (b.dataset.gsMonthFsHook === "1") return;
+              const aria = (b.getAttribute("aria-label") || "").toLowerCase();
+              const title = (b.getAttribute("title") || "").toLowerCase();
+              const testid = (b.getAttribute("data-testid") || "").toLowerCase();
+              const looksFs =
+                testid.includes("fullscreen") ||
+                aria.includes("fullscreen") ||
+                aria.includes("full screen") ||
+                title.includes("fullscreen") ||
+                (aria.includes("전체") && aria.includes("화면"));
+              if (!looksFs) return;
+              b.dataset.gsMonthFsHook = "1";
+              b.addEventListener(
+                "click",
+                function (ev) {{
+                  ev.preventDefault();
+                  ev.stopPropagation();
+                  if (typeof ev.stopImmediatePropagation === "function") ev.stopImmediatePropagation();
+                  window.open(href, "_blank", "noopener,noreferrer");
+                }},
+                true
+              );
+              hooked = true;
+            }});
+            return hooked;
+          }}
+
+          function tryBind() {{
+            const root = doc.querySelector(".st-key-monthly_timetable_grid");
+            if (!root) return false;
+            return hookFullscreenButton(root);
+          }}
+
+          tryBind();
+          setTimeout(tryBind, 80);
+          setTimeout(tryBind, 300);
+          setTimeout(tryBind, 800);
+        }})();
+        </script>
+        """,
+        height=0,
+    )
+
+
 def _render_monthly_timetable(conn, df):
-    from core.fullscreen_view import FS_SCHEDULE_MONTH, new_tab_link_markdown
+    from core.fullscreen_view import schedule_month_fullscreen_href
 
     now = datetime.now()
     c1, c2 = st.columns(2)
@@ -287,24 +353,20 @@ def _render_monthly_timetable(conn, df):
     with c2:
         month = st.number_input("월", min_value=1, max_value=12, value=now.month, step=1)
 
-    st.markdown(
-        new_tab_link_markdown(
-            "이 연·월 표를 새 창에서 크게 보기",
-            FS_SCHEDULE_MONTH,
-            schedule_year=int(year),
-            schedule_month=int(month),
-        ),
-        unsafe_allow_html=True,
-    )
-
     if df.empty:
         st.info("등록된 시간표가 없습니다.")
         return
 
     table_df, active_df = build_monthly_timetable_parts(df, int(year), int(month))
 
-    st.caption(f"{int(year)}년 {int(month)}월 기준 | 시간대별 정원 {MAX_STUDENTS_PER_SLOT}명")
-    st.dataframe(table_df, use_container_width=True, hide_index=True)
+    st.caption(
+        f"{int(year)}년 {int(month)}월 기준 | 시간대별 정원 {MAX_STUDENTS_PER_SLOT}명 — "
+        "표 상단 «전체 화면» 아이콘을 누르면 이 연·월을 새 탭에서 넓게 볼 수 있습니다."
+    )
+    _href_fs = schedule_month_fullscreen_href(int(year), int(month))
+    with st.container(key="monthly_timetable_grid"):
+        st.dataframe(table_df, use_container_width=True, hide_index=True)
+    _inject_monthly_timetable_fullscreen_opens_new_tab(_href_fs)
 
     # 시간 수정 기능
     st.markdown("---")

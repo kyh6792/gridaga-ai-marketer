@@ -788,39 +788,6 @@ def _get_latest_reg_event_map(ttl=60):
         return {}
 
 
-def update_student_status(student_id, new_status, note_append=None):
-    """Google Sheets `students`의 `상태`를 변경합니다. 선택 시 메모에 한 줄을 덧붙입니다."""
-    if new_status not in STUDENT_STATUS_OPTIONS:
-        return False, "상태는 재원 / 휴원 / 퇴원 중에서만 선택할 수 있습니다."
-    try:
-        conn = get_conn()
-        df = _safe_read(conn, worksheet="students", ttl=0)
-        if df is None or df.empty:
-            return False, "명단을 불러올 수 없습니다."
-
-        df["ID"] = pd.to_numeric(df["ID"], errors="coerce").fillna(0).astype(int).astype(str)
-        idx = df.index[df["ID"] == str(student_id)].tolist()
-        if not idx:
-            return False, "수강생을 찾을 수 없습니다."
-
-        row_idx = idx[0]
-        df.at[row_idx, "상태"] = new_status
-
-        if note_append and str(note_append).strip():
-            if "메모" not in df.columns:
-                df["메모"] = ""
-            old_memo = df.at[row_idx, "메모"]
-            old_memo = "" if pd.isna(old_memo) else str(old_memo)
-            tag = datetime.now().strftime("%Y-%m-%d")
-            line = f"[{tag} 상태:{new_status}] {str(note_append).strip()}"
-            df.at[row_idx, "메모"] = (old_memo + "\n" + line).strip()
-
-        _safe_update(conn, worksheet="students", data=df)
-        return True, f"상태가 「{new_status}」(으)로 저장되었습니다."
-    except Exception as e:
-        return False, f"상태 저장 실패: {e}"
-
-
 def update_student_profile(
     student_id,
     *,
@@ -976,35 +943,7 @@ def display_student_list(show_mode="list"):
                         unsafe_allow_html=True,
                     )
 
-                    if show_mode != "edit":
-                        with st.expander("재원 · 휴원 · 퇴원 설정", expanded=False):
-                            cur = stu_status if stu_status in STUDENT_STATUS_OPTIONS else "재원"
-                            idx_sel = list(STUDENT_STATUS_OPTIONS).index(cur)
-                            new_status = st.selectbox(
-                                "상태",
-                                list(STUDENT_STATUS_OPTIONS),
-                                index=idx_sel,
-                                key=f"status_sel_{row['ID']}",
-                                help="휴원: 복귀 예정 / 퇴원: 수강 종료. 재원으로 되돌리면 다시 출석·시간표에 포함됩니다.",
-                            )
-                            status_note = st.text_input(
-                                "메모에 남길 내용 (선택)",
-                                key=f"status_note_{row['ID']}",
-                                placeholder="예: 3월 한 달 휴원, 가족 일정",
-                            )
-                            if st.button("상태 저장", key=f"status_save_{row['ID']}", use_container_width=True):
-                                ok, msg = update_student_status(
-                                    row["ID"],
-                                    new_status,
-                                    note_append=status_note.strip() or None,
-                                )
-                                if ok:
-                                    st.success(msg)
-                                    st.rerun()
-                                else:
-                                    st.error(msg)
-
-                    with st.expander("수정", expanded=(show_mode == "edit")):
+                    with st.expander("회원 정보 수정", expanded=(show_mode == "edit")):
                         cur = stu_status if stu_status in STUDENT_STATUS_OPTIONS else "재원"
                         fresh_course_options = get_course_options(force_refresh=False)
                         cur_course = str(row["수강코스"]) if pd.notna(row["수강코스"]) else ""

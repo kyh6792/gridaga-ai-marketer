@@ -1241,10 +1241,10 @@ def render_owner_brand_header():
 def render_owner_menu_grid(owner_login_at, active_idx=None):
     del owner_login_at  # 버튼 기반 전환으로 링크 쿼리 조합은 사용하지 않음.
     items = [
-        ("마케팅", 0),
-        ("회원관리", 1),
-        ("재무", 2),
-        ("커리큘럼", 3),
+        ("회원관리", 0),
+        ("재무", 1),
+        ("커리큘럼", 2),
+        ("마케팅", 3),
     ]
 
     row = st.columns(4, gap="small")

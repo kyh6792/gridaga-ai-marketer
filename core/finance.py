@@ -545,6 +545,8 @@ def run_finance_ui():
 
 def render_finance_expenses_fullscreen_page():
     """?fullscreen=finance_expenses&expense_month=YYYY-MM — 새 탭 전용(조회·읽기)."""
+    from core.fullscreen_view import fullscreen_page_close_block_html
+
     try:
         import core.ui as _ui
 
@@ -588,7 +590,4 @@ def render_finance_expenses_fullscreen_page():
             use_container_width=True,
             hide_index=True,
         )
-    st.markdown(
-        '<p style="margin-top:1rem;"><a href="/" target="_self">← 메인 화면으로</a></p>',
-        unsafe_allow_html=True,
-    )
+    st.markdown(fullscreen_page_close_block_html(), unsafe_allow_html=True)

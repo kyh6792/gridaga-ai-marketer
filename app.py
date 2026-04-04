@@ -331,8 +331,8 @@ def render_intro_branch():
             background-color: transparent !important;
             box-shadow: none !important;
         }
-        div[data-testid="stButton"] > button.entry-student-btn,
-        div[data-testid="stButton"] > button.entry-teacher-btn {
+        /* 첫 화면 원생용·선생님: 동일 박스(전역 stButton 스타일과 충돌 방지 위해 intro 래퍼로 한정) */
+        .st-key-intro-center-wrap div[data-testid="stButton"] > button.entry-intro-btn {
             position: relative !important;
             border: none !important;
             outline: none !important;
@@ -344,24 +344,19 @@ def render_intro_branch():
             width: 100% !important;
             max-width: 100% !important;
             box-sizing: border-box !important;
-            /* 두 버튼 동일 박스(현재 대비 1/2) */
             min-height: 38px !important;
             height: 38px !important;
             max-height: 38px !important;
             border-radius: 12px !important;
-            /* hidden 켜면 투명 영역이 잘려 캔버스가 안 보일 수 있음 */
             overflow: visible !important;
             transition: transform 120ms ease, filter 120ms ease !important;
-            box-sizing: border-box !important;
             background-color: transparent !important;
         }
-        div[data-testid="stButton"] > button.entry-student-btn:focus-visible,
-        div[data-testid="stButton"] > button.entry-teacher-btn:focus-visible {
+        .st-key-intro-center-wrap div[data-testid="stButton"] > button.entry-intro-btn:focus-visible {
             outline: 2px solid #B88962 !important;
             outline-offset: 3px !important;
         }
-        div[data-testid="stButton"] > button.entry-student-btn > div,
-        div[data-testid="stButton"] > button.entry-teacher-btn > div {
+        .st-key-intro-center-wrap div[data-testid="stButton"] > button.entry-intro-btn > div {
             position: absolute !important;
             inset: 0 !important;
             border: none !important;
@@ -376,14 +371,11 @@ def render_intro_branch():
             flex-direction: column !important;
             justify-content: center !important;
             align-items: center !important;
-            /* 배경 이미지는 button에만 — 여기서 어두운 막 깔면 또 ‘뒷판’처럼 보일 수 있음 */
             background: transparent !important;
             pointer-events: none !important;
         }
-        div[data-testid="stButton"] > button.entry-student-btn p,
-        div[data-testid="stButton"] > button.entry-student-btn span,
-        div[data-testid="stButton"] > button.entry-teacher-btn p,
-        div[data-testid="stButton"] > button.entry-teacher-btn span {
+        .st-key-intro-center-wrap div[data-testid="stButton"] > button.entry-intro-btn p,
+        .st-key-intro-center-wrap div[data-testid="stButton"] > button.entry-intro-btn span {
             pointer-events: none !important;
             position: relative !important;
             width: auto !important;
@@ -403,16 +395,21 @@ def render_intro_branch():
             text-align: center !important;
             text-shadow: 0 1px 4px rgba(24, 14, 8, 0.75), 0 0 1px rgba(24, 14, 8, 0.5) !important;
         }
-        div[data-testid="stButton"] > button.entry-student-btn {
+        .st-key-intro-center-wrap div[data-testid="stButton"] > button.entry-student-btn {
             background: __STUDENT_BG__ !important;
             background-color: transparent !important;
+            background-size: cover !important;
+            background-position: center !important;
+            background-repeat: no-repeat !important;
         }
-        div[data-testid="stButton"] > button.entry-teacher-btn {
+        .st-key-intro-center-wrap div[data-testid="stButton"] > button.entry-teacher-btn {
             background: __TEACHER_BG__ !important;
             background-color: transparent !important;
+            background-size: cover !important;
+            background-position: center !important;
+            background-repeat: no-repeat !important;
         }
-        div[data-testid="stButton"] > button.entry-student-btn:active,
-        div[data-testid="stButton"] > button.entry-teacher-btn:active {
+        .st-key-intro-center-wrap div[data-testid="stButton"] > button.entry-intro-btn:active {
             transform: translateY(2px) scale(0.988) !important;
             filter: brightness(0.93) !important;
         }
@@ -466,11 +463,11 @@ def render_intro_branch():
                 const t = (b.innerText || "").trim();
                 const shell = b.closest('div[data-testid="stButton"]');
                 if (t.includes("원생용")) {
-                  b.classList.add("entry-student-btn");
+                  b.classList.add("entry-intro-btn", "entry-student-btn");
                   if (shell) shell.classList.add("entry-btn-shell");
                 }
                 if (t.includes("선생님")) {
-                  b.classList.add("entry-teacher-btn");
+                  b.classList.add("entry-intro-btn", "entry-teacher-btn");
                   if (shell) shell.classList.add("entry-btn-shell");
                 }
               });
@@ -492,13 +489,13 @@ def render_student_entry():
     st.markdown(
         """
         <style>
-        /* 원생 출석 화면에서는 버튼 패딩을 줄여 3열 키패드 고정 */
+        /* 원생 출석: 키패드·확인·취소·처음으로 = 직전 단계 대비 ~70% (주차 링크 동일) */
         div[data-testid="stButton"] > button {
             width: 100% !important;
             box-sizing: border-box !important;
-            padding: 0.3rem 0.14rem !important;
-            min-height: 107px !important;
-            font-size: 1.57rem !important;
+            padding: 0.15rem 0.07rem !important;
+            min-height: 53px !important;
+            font-size: 0.77rem !important;
             font-weight: 700 !important;
         }
         /* Streamlit 모바일 자동 스택 방지: 키패드 3열 강제 유지 */
@@ -506,7 +503,7 @@ def render_student_entry():
             display: flex !important;
             flex-direction: row !important;
             flex-wrap: nowrap !important;
-            gap: 0.25rem !important;
+            gap: 0.12rem !important;
         }
         div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"],
         div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
@@ -518,14 +515,36 @@ def render_student_entry():
         /* 세로 모드(좁은 폭)에서 추가 축소 */
         @media (max-width: 480px) {
             div[data-testid="stButton"] > button {
-                padding: 0.21rem 0.05rem !important;
-                min-height: 91px !important;
-                font-size: 1.33rem !important;
+                padding: 0.11rem 0.03rem !important;
+                min-height: 45px !important;
+                font-size: 0.65rem !important;
                 font-weight: 700 !important;
             }
             div[data-testid="stHorizontalBlock"] {
-                gap: 0.14rem !important;
+                gap: 0.07rem !important;
             }
+            .st-key-student_parking_link a.student-parking-link {
+                padding: 0.11rem 0.03rem !important;
+                min-height: 45px !important;
+                font-size: 0.65rem !important;
+            }
+        }
+        /* 주차등록(링크): 확인·요청 취소와 동일 크기 */
+        .st-key-student_parking_link a.student-parking-link {
+            width: 100% !important;
+            box-sizing: border-box !important;
+            padding: 0.15rem 0.07rem !important;
+            min-height: 53px !important;
+            font-size: 0.77rem !important;
+            font-weight: 700 !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            border-radius: 0.5rem !important;
+            border: 1px solid rgba(49, 51, 63, 0.2) !important;
+            background: rgba(240, 242, 246, 0.95) !important;
+            color: #31333f !important;
+            text-decoration: none !important;
         }
         </style>
         """,
@@ -575,7 +594,8 @@ def render_student_entry():
                     st.session_state["student_message_type"] = ""
                     st.rerun()
 
-    action_col1, action_col2 = st.columns(2, gap="small")
+    _iparking_url = "http://members.iparking.co.kr/"
+    action_col1, action_col2, action_col3 = st.columns(3, gap="small")
     with action_col1:
         if st.button("✅ 확인", type="primary", use_container_width=True):
             student_id = st.session_state.get("student_id_input", "").strip()
@@ -604,6 +624,13 @@ def render_student_entry():
             st.session_state["student_message"] = str(msg)
             st.session_state["student_message_type"] = "success" if ok else "error"
             st.rerun()
+    with action_col3:
+        with st.container(key="student_parking_link"):
+            st.markdown(
+                f'<a href="{_iparking_url}" target="_blank" rel="noopener noreferrer" '
+                f'class="student-parking-link">🅿️ 주차등록</a>',
+                unsafe_allow_html=True,
+            )
 
     st.markdown("---")
     if st.button("⬅️ 처음으로", use_container_width=True, key="back_from_student"):
@@ -721,10 +748,10 @@ def render_owner_menu():
                 p1, p2 = st.columns(2, gap="small")
                 with p1:
                     if st.button("승인하러 가기", use_container_width=True, key="owner_pending_prompt_yes"):
-                        st.session_state["owner_menu_index"] = 1
+                        st.session_state["owner_menu_index"] = 0
                         st.session_state["open_attendance_manager_once"] = True
                         st.session_state["owner_pending_prompt_closed"] = True
-                        st.query_params["owner_menu_idx"] = "1"
+                        st.query_params["owner_menu_idx"] = "0"
                         st.rerun()
                 with p2:
                     if st.button("아니요", use_container_width=True, key="owner_pending_prompt_no"):
@@ -757,19 +784,19 @@ def render_owner_menu():
 
     with st.container(border=True):
         if selected_idx == 0:
-            from core.marketer import run_marketing_ui
-
-            run_marketing_ui()
-        elif selected_idx == 1:
             run_student_ui()
-        elif selected_idx == 2:
+        elif selected_idx == 1:
             from core.finance import run_finance_ui
 
             run_finance_ui()
-        elif selected_idx == 3:
+        elif selected_idx == 2:
             from core.curriculum import run_curriculum_ui
 
             run_curriculum_ui()
+        elif selected_idx == 3:
+            from core.marketer import run_marketing_ui
+
+            run_marketing_ui()
 
     st.markdown("<br><br>", unsafe_allow_html=True)
     if st.button("로그아웃", use_container_width=True, key="owner_logout_bottom"):
