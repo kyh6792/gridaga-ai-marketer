@@ -34,6 +34,7 @@ _WS_MAP: dict[str, TableMap] = {
     "curriculum": TableMap("curriculum", "course_id"),
     "finance_transactions": TableMap("finance_transactions", "tx_id"),
     "finance_expenses": TableMap("finance_expenses", "ex_id"),
+    "progress_records": TableMap("progress_records", "record_id"),
 }
 
 
@@ -99,7 +100,15 @@ def _legacy_from_supabase(worksheet: str, rows: list[dict[str, Any]]) -> pd.Data
     if ws == "attendance_log":
         rename = {"time_text": "time"}
         df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
-        ordered = ["time", "student_id", "student_name", "remain_count", "event"]
+        # 출석표 필터·승인 연계용 — 없으면 빈 칸 (직접 차감 vs 승인 구분)
+        for c in ["time", "student_id", "student_name", "remain_count", "event", "request_id", "request_time", "approved_time"]:
+            if c not in df.columns:
+                df[c] = ""
+        ordered = ["time", "student_id", "student_name", "remain_count", "event", "request_id", "request_time", "approved_time"]
+        return df[ordered].copy()
+
+    if ws == "progress_records":
+        ordered = ["record_id", "student_id", "student_name", "record_date", "body", "updated_at"]
         for c in ordered:
             if c not in df.columns:
                 df[c] = ""
@@ -178,11 +187,22 @@ def _supabase_from_legacy(worksheet: str, df: pd.DataFrame) -> list[dict[str, An
     if ws == "attendance_log":
         if "time" in frame.columns and "time_text" not in frame.columns:
             frame = frame.rename(columns={"time": "time_text"})
+        # Supabase 테이블은 보통 이 5컬럼만 있음. request_id 등 부가 컬럼까지 보내면 INSERT가 실패함(PGRST204 등).
         needed = ["time_text", "student_id", "student_name", "remain_count", "event"]
         for c in needed:
             if c not in frame.columns:
                 frame[c] = 0 if c == "remain_count" else ""
         frame["remain_count"] = pd.to_numeric(frame["remain_count"], errors="coerce").fillna(0).astype(int)
+        frame = frame[needed].copy()
+        return frame.astype(object).where(pd.notna(frame), "").to_dict(orient="records")
+
+    if ws == "progress_records":
+        needed = ["record_id", "student_id", "student_name", "record_date", "body", "updated_at"]
+        for c in needed:
+            if c not in frame.columns:
+                frame[c] = ""
+        frame["record_id"] = frame["record_id"].astype(str).str.strip()
+        frame = frame[frame["record_id"] != ""]
         return frame.astype(object).where(pd.notna(frame), "").to_dict(orient="records")
 
     # default passthrough for schedule/curriculum/finance
@@ -259,6 +279,31 @@ class DBConn:
         perf_log(f"db.supabase.read.{tm.table}.rows={len(rows)}", (time.perf_counter() - _t0) * 1000.0)
         return out
 
+    def insert_append_only(self, *, worksheet: str | None = None, data=None):
+        """Supabase append-only 테이블에만 행 INSERT (시트처럼 전체 스냅샷 replace 불가)."""
+        _t0 = time.perf_counter()
+        if self.backend != "supabase":
+            raise ValueError("insert_append_only는 DB_BACKEND=supabase 일 때만 사용할 수 있습니다.")
+        ws = str(worksheet or "").strip()
+        if not ws:
+            return None
+        tm = _WS_MAP.get(ws)
+        if tm is None:
+            raise ValueError(f"Unknown worksheet mapping for Supabase: {ws}")
+        if tm.pk:
+            raise ValueError("append-only 워크시트(attendance_log 등)만 insert_append_only를 사용하세요.")
+
+        df = data if isinstance(data, pd.DataFrame) else pd.DataFrame(data)
+        if df is None or df.empty:
+            return None
+        payload = _supabase_from_legacy(ws, df)
+        if not payload:
+            return None
+        _sb().table(tm.table).insert(payload).execute()
+        self._cache_clear()
+        perf_log(f"db.supabase.insert_append_only.{tm.table}.rows={len(payload)}", (time.perf_counter() - _t0) * 1000.0)
+        return None
+
     def update(self, *, worksheet: str | None = None, spreadsheet: str | None = None, data=None, **kwargs):
         _t0 = time.perf_counter()
         if self.backend != "supabase":
@@ -274,10 +319,41 @@ class DBConn:
             raise ValueError(f"Unknown worksheet mapping for Supabase: {ws}")
 
         df = data if isinstance(data, pd.DataFrame) else pd.DataFrame(data)
+        # attendance_log: 앱은 시트처럼 [기존+신규] 전체 DataFrame을 넘김. Supabase는 INSERT만 가능하므로
+        # 전체를 넣으면 매번 기존 행이 중복 삽입됨 → 신규 1행(마지막 행)만 INSERT.
+        if ws == "attendance_log" and len(df.index) > 0:
+            df = df.iloc[[-1]].copy()
         payload = _supabase_from_legacy(ws, df)
 
         if tm.pk:
-            # Replace-by-upsert (closest behavior to sheet overwrite)
+            # 시트 update는 전체를 덮어쓰지만, Supabase upsert는 payload에 없는 PK 행을 삭제하지 않음.
+            # 행 삭제(일정·명부 등)가 DB에 반영되도록, 스냅샷에 없는 PK는 먼저 DELETE.
+            pk_col = tm.pk
+            try:
+                res_ids = _sb().table(tm.table).select(pk_col).execute()
+                existing_set: set[str] = set()
+                for row in list(res_ids.data or []):
+                    v = row.get(pk_col)
+                    if v is None:
+                        continue
+                    s = str(v).strip()
+                    if s:
+                        existing_set.add(s)
+                new_set: set[str] = set()
+                for p in payload or []:
+                    v = p.get(pk_col) if isinstance(p, dict) else None
+                    if v is None:
+                        continue
+                    s = str(v).strip()
+                    if s:
+                        new_set.add(s)
+                removed = existing_set - new_set
+                if removed:
+                    _sb().table(tm.table).delete().in_(pk_col, list(removed)).execute()
+            except Exception as e:
+                perf_log(f"db.supabase.update.sync_delete.{tm.table}.error={e!r}", (time.perf_counter() - _t0) * 1000.0)
+                raise
+
             if payload:
                 _sb().table(tm.table).upsert(payload).execute()
             self._cache_clear()

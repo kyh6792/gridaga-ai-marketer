@@ -2,6 +2,10 @@ import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
 from datetime import datetime
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover
+    ZoneInfo = None  # type: ignore
 import html
 import time
 import base64
@@ -38,6 +42,20 @@ def _use_sheets_api_first_for_worksheet(worksheet: str) -> bool:
     return not _db_backend_is_supabase()
 
 
+def _now_kst():
+    """출석·로그 표시 날짜를 한국 기준으로 맞춤(Cloud Run UTC와 하루 어긋남 방지)."""
+    if ZoneInfo is not None:
+        try:
+            return datetime.now(ZoneInfo("Asia/Seoul"))
+        except Exception:
+            pass
+    return datetime.now()
+
+
+def _datetime_str_kst():
+    return _now_kst().strftime("%Y-%m-%d %H:%M:%S")
+
+
 def invalidate_owner_dashboard_sheet_caches():
     """승인/요청접수/로그재시도 등 시트가 바뀐 뒤 대시보드가 바로 반영되게 캐시 제거."""
     for k in (
@@ -49,6 +67,12 @@ def invalidate_owner_dashboard_sheet_caches():
         _OWNER_DASH_BUNDLE_TS,
     ):
         st.session_state.pop(k, None)
+
+
+def _request_id_empty_mask(rid: pd.Series) -> pd.Series:
+    """attendance_log에서 빈 request_id가 NaN 또는 문자열 'nan'으로 올 수 있음 (직접 차감 vs 승인 구분)."""
+    s = rid.astype(str).str.strip()
+    return rid.isna() | s.eq("") | s.str.lower().isin(("nan", "none", "<na>"))
 
 
 def _get_students_sheets_api():
@@ -294,7 +318,7 @@ def run_student_ui():
     with st.expander("👥 회원 등록 관리", expanded=False):
         student_section = st.segmented_control(
             "회원 메뉴",
-            ["📝 신규 등록", "📋 원생 명부", "✏️ 명부 수정"],
+            ["📝 신규 등록", "📋 원생 명부", "✏️ 명부 수정", "📒 진도기록 관리"],
             default="📝 신규 등록",
             key="student_main_section",
             label_visibility="collapsed",
@@ -397,9 +421,14 @@ def run_student_ui():
     
         elif student_section == "📋 원생 명부":
             display_student_list(show_mode="list")
-    
-        else:
+
+        elif student_section == "✏️ 명부 수정":
             display_student_list(show_mode="edit")
+
+        else:
+            from core.progress_records import run_progress_records_ui
+
+            run_progress_records_ui()
 
     with st.expander("✅ 회원 출석 관리", expanded=bool(st.session_state.pop("open_attendance_manager_once", False))):
         approve_bg = "linear-gradient(120deg, #8ECF9B 0%, #6FB47F 100%)"
@@ -532,6 +561,9 @@ def run_student_ui():
                             st.rerun()
 
         with st.expander("출석표", expanded=False):
+            _log_err = st.session_state.get("attendance_log_error")
+            if _log_err:
+                st.error(f"출석 로그 처리 오류: {_log_err}")
             view_scope = st.segmented_control(
                 "출석표 범위",
                 ["오늘", "이번달"],
@@ -539,7 +571,8 @@ def run_student_ui():
                 key="attendance_log_scope",
                 label_visibility="collapsed",
             )
-            recent_logs = get_recent_attendance_logs(limit=500, force_refresh=False)
+            # 차갑 직후 세션 캐시·TTL로 방금 행이 안 보이는 경우 방지
+            recent_logs = get_recent_attendance_logs(limit=500, force_refresh=True)
             if recent_logs.empty:
                 st.caption("표시할 출석 이력이 없습니다.")
             else:
@@ -548,11 +581,13 @@ def run_student_ui():
                 # 「오늘」필터에서 원장 직접 차감만 빠지는 경우가 있음 → 승인 연계(request_id 있음)일 때만 승인 시각 사용
                 time_ts = pd.to_datetime(work["time"], errors="coerce") if "time" in work.columns else pd.Series(pd.NaT, index=work.index)
                 if "approved_time" in work.columns and "request_id" in work.columns:
-                    rid = work["request_id"].astype(str).str.strip()
+                    linked = ~_request_id_empty_mask(work["request_id"])
                     approved_ts = pd.to_datetime(
-                        work["approved_time"].where(rid != "", pd.NA),
+                        work["approved_time"].where(linked, pd.NA),
                         errors="coerce",
                     )
+                    bad = approved_ts.notna() & (approved_ts.dt.year < 2000)
+                    approved_ts = approved_ts.mask(bad)
                 elif "approved_time" in work.columns:
                     approved_ts = pd.to_datetime(work["approved_time"], errors="coerce")
                     bad = approved_ts.notna() & (approved_ts.dt.year < 2000)
@@ -560,7 +595,7 @@ def run_student_ui():
                 else:
                     approved_ts = pd.Series(pd.NaT, index=work.index)
                 ts = approved_ts.where(approved_ts.notna(), time_ts)
-                now = datetime.now()
+                now = _now_kst()
                 if view_scope == "오늘":
                     mask = ts.dt.date == now.date()
                 else:
@@ -828,10 +863,11 @@ def update_student_profile(
                 df.at[row_idx, "등록일"] = str(reg_date).strip()
         if course is not None:
             df.at[row_idx, "수강코스"] = str(course).strip()
+        # 시트에서 읽은 열이 int64일 수 있음 — 문자열('12') 대입 시 Invalid value for dtype 오류
         if total_sessions is not None:
-            df.at[row_idx, "총 횟수"] = str(int(total_sessions))
+            df.at[row_idx, "총 횟수"] = int(float(total_sessions))
         if remain_sessions is not None:
-            df.at[row_idx, "잔여 횟수"] = str(int(remain_sessions))
+            df.at[row_idx, "잔여 횟수"] = int(float(remain_sessions))
         if status is not None:
             norm = _normalize_student_status(status)
             df.at[row_idx, "상태"] = norm if norm in STUDENT_STATUS_OPTIONS else "재원"
@@ -1426,17 +1462,23 @@ def approve_all_pending_requests(limit=200):
                 if students_changed:
                     _safe_update(conn, worksheet="students", data=students_df)
                 if log_rows:
-                    try:
-                        log_df = _safe_read(conn, worksheet="attendance_log", ttl=15)
-                    except Exception:
-                        log_df = pd.DataFrame(columns=log_columns)
-                    if log_df is None or log_df.empty:
-                        log_df = pd.DataFrame(columns=log_columns)
-                    for col in log_columns:
-                        if col not in log_df.columns:
-                            log_df[col] = ""
-                    log_df = pd.concat([log_df, pd.DataFrame(log_rows)], ignore_index=True)
-                    _safe_update(conn, worksheet="attendance_log", data=log_df)
+                    if _db_backend_is_supabase():
+                        try:
+                            conn.insert_append_only(worksheet="attendance_log", data=pd.DataFrame(log_rows))
+                        except Exception as e:
+                            st.session_state["attendance_log_error"] = repr(e)
+                    else:
+                        try:
+                            log_df = _safe_read(conn, worksheet="attendance_log", ttl=15)
+                        except Exception:
+                            log_df = pd.DataFrame(columns=log_columns)
+                        if log_df is None or log_df.empty:
+                            log_df = pd.DataFrame(columns=log_columns)
+                        for col in log_columns:
+                            if col not in log_df.columns:
+                                log_df[col] = ""
+                        log_df = pd.concat([log_df, pd.DataFrame(log_rows)], ignore_index=True)
+                        _safe_update(conn, worksheet="attendance_log", data=log_df)
                 _safe_update(conn, worksheet="attendance_requests", data=req_df)
             invalidate_owner_dashboard_sheet_caches()
 
@@ -1500,6 +1542,32 @@ def save_attendance_log(student_id, student_name, remain_count, request_meta=Non
             "approved_time",
         ]
 
+        request_meta = request_meta or {}
+        new_row = pd.DataFrame(
+            [
+                {
+                    "time": _datetime_str_kst(),
+                    "student_id": str(student_id),
+                    "student_name": str(student_name),
+                    "remain_count": int(remain_count),
+                    "event": str(request_meta.get("event", "attendance_deducted")),
+                    "request_id": str(request_meta.get("request_id", "")),
+                    "request_time": str(request_meta.get("request_time", "")),
+                    "approved_time": str(request_meta.get("approved_time", "")),
+                }
+            ]
+        )
+
+        # Supabase: 시트처럼 전체 스냅샷 upsert가 아니라 행 INSERT만. 읽기 실패·다른 컬럼으로 INSERT 실패 방지.
+        if _db_backend_is_supabase():
+            try:
+                conn.insert_append_only(worksheet="attendance_log", data=new_row)
+                invalidate_owner_dashboard_sheet_caches()
+                return True
+            except Exception as e:
+                st.session_state["attendance_log_error"] = f"attendance_log 저장 실패(Supabase): {repr(e)}"
+                return False
+
         try:
             log_df = _safe_read(conn, worksheet="attendance_log", ttl=15)
         except Exception as e:
@@ -1517,17 +1585,6 @@ def save_attendance_log(student_id, student_name, remain_count, request_meta=Non
         if log_df is None or log_df.empty:
             log_df = pd.DataFrame(columns=base_columns)
 
-        request_meta = request_meta or {}
-        new_row = pd.DataFrame([{
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "student_id": str(student_id),
-            "student_name": str(student_name),
-            "remain_count": int(remain_count),
-            "event": str(request_meta.get("event", "attendance_deducted")),
-            "request_id": str(request_meta.get("request_id", "")),
-            "request_time": str(request_meta.get("request_time", "")),
-            "approved_time": str(request_meta.get("approved_time", "")),
-        }])
         updated_df = pd.concat([log_df, new_row], ignore_index=True)
         _safe_update(conn, worksheet="attendance_log", data=updated_df)
         invalidate_owner_dashboard_sheet_caches()
